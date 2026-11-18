@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "hd_movie.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_hmap.h"
@@ -1600,6 +1601,11 @@ static void tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage,
     tex_info_lookup(ex, r, h, storage, separate, out, &image);
     if (image && !storage && image == vk_dlaa_swap_img) {
         VkImageView v = swap_view(ex);
+        if (v) out->imageView = v, out->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+    if (image && !storage && h && __atomic_load_n(&hd_movie_live, __ATOMIC_ACQUIRE)) {   // a replacement movie's planes
+        const VkTexImage *ti = vk_texture_by_id_locked((int)(h & 0xfffff), NULL, NULL);
+        VkImageView v = ti ? hd_movie_view(ti->format, ti->width, ti->height, r->slot) : VK_NULL_HANDLE;
         if (v) out->imageView = v, out->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     }
     if (!twin_dispatch || storage || separate || !h || !(r->type & 0x400)) return;

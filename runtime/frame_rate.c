@@ -28,6 +28,7 @@
 #include "audren.h"
 #include "cfg.h"
 #include "gfx.h"
+#include "hd_movie.h"
 #include "host.h"
 #include "layout.h"
 #include "platform/platform.h"
@@ -987,6 +988,7 @@ void rt_movie_opened(Cpu *c) {
     const uint32_t *hb = (const uint32_t *)h;
     if ((uint64_t)hb[0] * hb[1] < MOVIE_MIN_PIXELS) return;
     int screen = movie_on_screen(hb);
+    if (!screen) hd_movie_opened(h);   // a file of the player's in its place (hd_movie.c)
     uint32_t loop;
     memcpy(&loop, (const uint8_t *)(uintptr_t)c->x[20] + 0x118, sizeof loop);
     for (int i = 0; i < MOVIE_SLOTS; i++) {
@@ -1017,6 +1019,7 @@ void rt_movie_opened(Cpu *c) {
 // The picture's shape likewise, with the last movie that is the picture.
 void rt_movie_close(Cpu *c) {
     uintptr_t h = (uintptr_t)c->x[0];
+    hd_movie_closed(h);
     int closed = -1, open = 0, picture = 0;
     for (int i = 0; i < MOVIE_SLOTS; i++) {
         uintptr_t want = h;

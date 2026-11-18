@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "hd_movie.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_hmap.h"
@@ -940,6 +941,7 @@ void vk_exec_pass_begin(VkExec *ex) {
     vk_contact_pass_begin(ex);
     vk_ao_pass(ex);     // after the opaque lighting, before the transparents (vk_ao.c)
     vk_dlaa_pass(ex);   // DLAA runs before the bloom chain's first pass (vk_dlaa.c)
+    hd_movie_pass_begin(ex);   // a replacement movie's next frame into its planes (hd_movie.c)
     // Learned targets (VkTexImage.fb_learned) are attached in the feedback layout
     VkImage want[9];
     VkImageAspectFlags wasp[9];

@@ -33,6 +33,7 @@
 
 #include "cfg.h"
 #include "fs.h"
+#include "hd_movie.h"
 #include "host.h"
 #include "input.h"
 #include "input_map.h"
@@ -1083,6 +1084,7 @@ uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
     if (!out || mode != FS_OPEN_READ) return FS_R_UNSUPPORTED_OPEN;
     const char *p = romfs_path_relative(mount_name, path);
     if (!p) return FS_R_PATH_NOT_FOUND;
+    hd_movie_romfs_open(p);   // names the movie BinkOpen returns next (hd_movie.c)
     uint64_t i = file_index(p);
     if (i == UINT64_MAX) return FS_R_PATH_NOT_FOUND;
     uint32_t ov = overlay_slot(i);
