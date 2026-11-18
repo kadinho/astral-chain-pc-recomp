@@ -31,11 +31,11 @@
 #include "vk_exec.h"
 #include "platform/platform.h"
 
-#define RING 6   // decoded frames kept ahead of the one Bink is at
+#define RING 12   // decoded frames kept ahead of the one Bink is at (12 4K frames: 150 MB)
 
 typedef struct {
     uint8_t *y, *u, *v;   // packed planes: w x h, then (w/2) x (h/2) twice
-    uint32_t idx;         // frame number from 0, UINT32_MAX empty
+    uint32_t idx;         // frame number from 0 counted on through loops (file frame idx % nframes), UINT32_MAX empty
 } Frame;
 
 int hd_movie_live;
@@ -49,6 +49,7 @@ static struct {
     // The movie being replaced (game thread sets, replay thread reads)
     uintptr_t hbink;
     uint32_t bw, bh, bframes;
+    int loop;              // the player loops the movie: frames go on past the end, from the first again
     // The file and its decoder (decoder thread)
     PlatFile *file;
     const uint8_t *map;
@@ -67,8 +68,10 @@ static struct {
     VkImageView view[3];
     uint32_t iw, ih;       // size of the images, 0 none
     int fresh;             // images not yet in GENERAL
-    uint32_t shown;        // frame in the images, UINT32_MAX none
-    uint64_t uploads, missed;
+    uint32_t shown;        // frame in the images (counted on through loops), UINT32_MAX none
+    uint32_t last_cur, loops;   // Bink's frame at the last pass, and the loops counted from its going back
+    uint64_t uploads, missed;   // frames uploaded; frames not decoded yet when Bink was at them (each counted once)
+    uint32_t missed_at;         // the last frame counted in missed
 } M;
 
 static void lazy_init(void) {
@@ -138,23 +141,24 @@ static void free_ring(void) {
     for (int i = 0; i < RING; i++) free(M.ring[i].y), M.ring[i] = (Frame){.idx = UINT32_MAX};
 }
 
-// Decoder thread: keeps the frames from `want` on in the ring, starting again from the first frame when Bink went
-// back (a loop) and skipping forward when it went ahead.
+// Decoder thread: keeps the frames from `want` on in the ring. Frames are counted on through a looping movie's loops,
+// so at the file's end the decoder goes on with its first frame (a key frame) before Bink gets there, and a loop
+// starting again finds its first frames decoded.
 static void decode_main(void *arg) {
     (void)arg;
     size_t ys = (size_t)M.w * M.h, cs = ys / 4;
     plat_mutex_lock(&M.mu);
     while (!M.stop) {
         uint32_t want = M.want;
-        // Bink went back past the ring (a loop starting again): decode again from the first frame, a key frame. Going
-        // ahead needs no seek: an inter frame needs the ones before it, so the frames up to `want` are decoded in turn
-        // (faster than real time) and only the ring's last RING are kept.
-        if (want < M.next && M.ring[want % RING].idx != want) M.next = 0;
-        if (M.next >= M.nframes || M.next >= want + RING) {
+        // Asked for a frame behind the ring: decode again from the first frame of that pass through the file, a key
+        // frame. Going ahead needs no seek: an inter frame needs the ones before it, so the frames up to `want` are
+        // decoded in turn (faster than real time) and only the ring's last RING are kept.
+        if (want < M.next && M.ring[want % RING].idx != want) M.next = want - want % M.nframes;
+        if ((!M.loop && M.next >= M.nframes) || M.next >= want + RING) {
             plat_cond_wait_ms(&M.cv, &M.mu, 50);
             continue;
         }
-        uint32_t idx = M.next++;
+        uint32_t v = M.next++, idx = v % M.nframes;
         plat_mutex_unlock(&M.mu);
         vpx_image_t *im = NULL;
         if (vpx_codec_decode(&M.dec, M.map + M.off_of[idx], M.size_of[idx], NULL, 0) == VPX_CODEC_OK) {
@@ -163,14 +167,14 @@ static void decode_main(void *arg) {
         }
         plat_mutex_lock(&M.mu);
         if (!im || im->fmt != VPX_IMG_FMT_I420 || im->d_w != M.w || im->d_h != M.h) continue;
-        Frame *f = &M.ring[idx % RING];
+        Frame *f = &M.ring[v % RING];
         if (!f->y) f->y = malloc(ys + 2 * cs), f->u = f->y + ys, f->v = f->u + cs;
         for (uint32_t r = 0; r < M.h; r++) memcpy(f->y + (size_t)r * M.w, im->planes[0] + (size_t)r * im->stride[0], M.w);
         for (uint32_t r = 0; r < M.h / 2; r++) {
             memcpy(f->u + (size_t)r * (M.w / 2), im->planes[1] + (size_t)r * im->stride[1], M.w / 2);
             memcpy(f->v + (size_t)r * (M.w / 2), im->planes[2] + (size_t)r * im->stride[2], M.w / 2);
         }
-        f->idx = idx;
+        f->idx = v;
         plat_cond_broadcast(&M.cv);
     }
     plat_mutex_unlock(&M.mu);
@@ -192,7 +196,7 @@ static void stop_decoder(void) {
     M.file = NULL, M.map = NULL;
 }
 
-void hd_movie_opened(uintptr_t h) {
+void hd_movie_opened(uintptr_t h, int loop) {
     lazy_init();
     if (M.off || !h) return;
     char name[64];
@@ -222,7 +226,8 @@ void hd_movie_opened(uintptr_t h) {
         return;
     }
     free_ring();
-    M.stop = 0, M.next = 0, M.want = 0, M.shown = UINT32_MAX;
+    M.missed_at = UINT32_MAX;
+    M.stop = 0, M.next = 0, M.want = 0, M.shown = UINT32_MAX, M.loop = loop != 0, M.last_cur = 0, M.loops = 0;
     M.bw = hb[0], M.bh = hb[1], M.bframes = hb[2];
     M.th = plat_thread_new(decode_main, NULL, "hd movie");
     __atomic_store_n(&M.hbink, h, __ATOMIC_RELEASE);
@@ -234,7 +239,7 @@ void hd_movie_closed(uintptr_t h) {
     if (!h || __atomic_load_n(&M.hbink, __ATOMIC_ACQUIRE) != h) return;
     __atomic_store_n(&M.hbink, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&hd_movie_live, 0, __ATOMIC_RELEASE);
-    rt_log("hd movie: closed after %llu frames uploaded, %llu presents without the frame ready",
+    rt_log("hd movie: closed after %llu frames uploaded, %llu of them late (not decoded yet when due)",
            (unsigned long long)M.uploads, (unsigned long long)M.missed);
     M.uploads = M.missed = 0;
     stop_decoder();
@@ -276,7 +281,11 @@ void hd_movie_pass_begin(VkExec *ex) {
     if (!h || !ex->cb) return;
     uint32_t cur = ((const uint32_t volatile *)h)[3];   // Bink's current frame, from 1
     uint32_t want = cur ? cur - 1 : 0;
-    if (want >= M.nframes) want = M.nframes - 1;
+    if (want >= M.nframes) want = M.nframes - 1;   // a file shorter than the Bink movie holds its last frame
+    // A looping movie's frame number goes back to 1 at each loop: count the loops, so frames keep counting on.
+    if (M.loop && want + M.nframes / 2 < M.last_cur) M.loops++;
+    M.last_cur = want;
+    want += M.loops * M.nframes;
     if (want == M.shown) return;
     plat_mutex_lock(&M.mu);
     if (M.want != want) M.want = want, plat_cond_broadcast(&M.cv);
@@ -284,7 +293,7 @@ void hd_movie_pass_begin(VkExec *ex) {
     int ready = f->idx == want;
     if (!ready) {
         plat_mutex_unlock(&M.mu);
-        M.missed++;
+        if (M.missed_at != want) M.missed_at = want, M.missed++;   // shown late: the last frame stays one more present
         return;
     }
     if (M.iw != M.w || M.ih != M.h) {
@@ -346,7 +355,9 @@ void hd_movie_pass_begin(VkExec *ex) {
     vk_completion_add(ex->fence, free_staging, s);
     M.fresh = 0;
     M.shown = want;
-    M.uploads++;
+    if (++M.uploads % 900 == 0)
+        rt_log("hd movie: %llu frames uploaded, %llu of them late (not decoded yet when due)", (unsigned long long)M.uploads,
+               (unsigned long long)M.missed);
     if (!__atomic_load_n(&hd_movie_live, __ATOMIC_ACQUIRE)) {
         __atomic_store_n(&hd_movie_live, 1, __ATOMIC_RELEASE);
         rt_log("hd movie: first frame shown (%u)", want);
@@ -360,6 +371,6 @@ VkImageView hd_movie_view(VkFormat format, uint32_t width, uint32_t height, int 
     if (width != M.bw / 2 || height != M.bh / 2) return VK_NULL_HANDLE;
     static int logged;
     if (logged < 4) logged++, rt_log("hd movie: chroma plane at slot %d", slot);
-    int cr = !(slot & 1) != M.swap_uv;   // the shader's slots: Y, Cb, Cr (seen on the title screen's movie)
+    int cr = (!(slot & 1)) != M.swap_uv;   // the shader's slots: Y, Cb, Cr (seen on the title screen's movie)
     return M.view[cr ? 2 : 1];
 }

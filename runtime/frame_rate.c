@@ -988,9 +988,9 @@ void rt_movie_opened(Cpu *c) {
     const uint32_t *hb = (const uint32_t *)h;
     if ((uint64_t)hb[0] * hb[1] < MOVIE_MIN_PIXELS) return;
     int screen = movie_on_screen(hb);
-    if (!screen) hd_movie_opened(h);   // a file of the player's in its place (hd_movie.c)
     uint32_t loop;
     memcpy(&loop, (const uint8_t *)(uintptr_t)c->x[20] + 0x118, sizeof loop);
+    if (!screen) hd_movie_opened(h, loop != 0);   // a file of the player's in its place (hd_movie.c)
     for (int i = 0; i < MOVIE_SLOTS; i++) {
         uintptr_t none = 0;
         if (atomic_compare_exchange_strong(&g_movies[i], &none, h)) {
