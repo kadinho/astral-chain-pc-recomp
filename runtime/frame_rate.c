@@ -986,11 +986,13 @@ void rt_movie_opened(Cpu *c) {
     uintptr_t h = (uintptr_t)c->x[0];
     if (!h) return;
     const uint32_t *hb = (const uint32_t *)h;
-    if ((uint64_t)hb[0] * hb[1] < MOVIE_MIN_PIXELS) return;
-    int screen = movie_on_screen(hb);
+    int screen = movie_on_screen(hb), small = (uint64_t)hb[0] * hb[1] < MOVIE_MIN_PIXELS;
     uint32_t loop;
     memcpy(&loop, (const uint8_t *)(uintptr_t)c->x[20] + 0x118, sizeof loop);
-    if (!screen) hd_movie_opened(h, loop != 0);   // a file of the player's in its place (hd_movie.c)
+    // Every movie: a full-screen one may be shown from a file of the player's, any other is checked against it
+    // (hd_movie.c)
+    hd_movie_opened(h, loop != 0, screen || small);
+    if (small) return;
     for (int i = 0; i < MOVIE_SLOTS; i++) {
         uintptr_t none = 0;
         if (atomic_compare_exchange_strong(&g_movies[i], &none, h)) {

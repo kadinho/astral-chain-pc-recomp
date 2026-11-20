@@ -15,8 +15,13 @@
 // Which file: the game opens a movie's file and then BinkOpen on its handle, so the last movie/*.bk2 that romfs_open
 // served names the movie BinkOpen returns next. Which textures: R8 at the Bink movie's size (Y) or half of it (chroma)
 // while that movie is open; the chroma planes are told apart by their slot (the shader's: Y 0, Cb 1, Cr 2), and
-// AC_HDMOVIE_SWAPUV=1 swaps them. AC_HDMOVIE=0 turns the whole feature off. Not done: one effect movie of the same size
-// playing on a screen in the scene while an event movie plays would take the event movie's frames too.
+// AC_HDMOVIE_SWAPUV=1 swaps them. AC_HDMOVIE=0 turns the whole feature off.
+//
+// Other movies: the RomFS also holds 389 effect movies (mv/*.bk2: 363 at 320x180, 11 at 640x360, 4 at 1280x720 that
+// play on screens in the scene, a few UI sizes). Every movie BinkOpen returns comes here; while one whose planes share
+// a size with the replaced movie's (Y or chroma: a 1280x720 effect movie with a 1280x720 event movie, or a 640x360 one
+// with its chroma) is open, the game's own planes are shown, since the textures could not be told apart by size. A
+// file whose shape is not the Bink movie's (another aspect ratio) is not used: the name came from another movie.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +63,7 @@ static struct {
     uint32_t w, h, nframes;
     vpx_codec_ctx_t dec;
     PlatThread *th;
+    int dec_ok;            // dec is made
     int stop;
     uint32_t next;         // next frame to decode
     uint32_t want;         // the frame the replay asks for
@@ -72,7 +78,52 @@ static struct {
     uint32_t last_cur, loops;   // Bink's frame at the last pass, and the loops counted from its going back
     uint64_t uploads, missed;   // frames uploaded; frames not decoded yet when Bink was at them (each counted once)
     uint32_t missed_at;         // the last frame counted in missed
+    // Other open movies (game thread, under mu): their handles and sizes; collide, how many share a plane size with
+    // the replaced movie (hd_movie_view reads it)
+    struct { uintptr_t h; uint32_t w, h2; } other[8];
+    int collide;
 } M;
+
+// Whether a movie of w x h has a plane (w x h, or w/2 x h/2) of the size of one of the replaced movie's.
+static int collides(uint32_t w, uint32_t h) {
+    uint32_t a[2][2] = {{w, h}, {w / 2, h / 2}}, b[2][2] = {{M.bw, M.bh}, {M.bw / 2, M.bh / 2}};
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 2; j++)
+            if (a[i][0] == b[j][0] && a[i][1] == b[j][1]) return 1;
+    return 0;
+}
+
+static void recount(void) {   // under mu
+    int n = 0;
+    if (M.hbink)
+        for (int i = 0; i < 8; i++) n += M.other[i].h && collides(M.other[i].w, M.other[i].h2);
+    if (n != M.collide && M.hbink)
+        rt_log("hd movie: %d other movie(s) with planes of the same size open: %s", n,
+               n ? "the game's planes are shown until they close" : "the file's frames again");
+    __atomic_store_n(&M.collide, n, __ATOMIC_RELEASE);
+}
+
+static void other_opened(uintptr_t h) {
+    const uint32_t *hb = (const uint32_t *)h;
+    plat_mutex_lock(&M.mu);
+    for (int i = 0; i < 8; i++)
+        if (!M.other[i].h) {
+            M.other[i].h = h, M.other[i].w = hb[0], M.other[i].h2 = hb[1];
+            break;
+        }
+    recount();
+    plat_mutex_unlock(&M.mu);
+}
+
+static int other_closed(uintptr_t h) {
+    int found = 0;
+    plat_mutex_lock(&M.mu);
+    for (int i = 0; i < 8; i++)
+        if (M.other[i].h == h) M.other[i].h = 0, found = 1;
+    if (found) recount();
+    plat_mutex_unlock(&M.mu);
+    return found;
+}
 
 static void lazy_init(void) {
     if (M.init) return;
@@ -141,12 +192,34 @@ static void free_ring(void) {
     for (int i = 0; i < RING; i++) free(M.ring[i].y), M.ring[i] = (Frame){.idx = UINT32_MAX};
 }
 
+// Decodes frame v (counted on through loops) into the ring; called with mu held, which it drops while decoding.
+static void decode_one(uint32_t v) {
+    size_t ys = (size_t)M.w * M.h, cs = ys / 4;
+    uint32_t idx = v % M.nframes;
+    plat_mutex_unlock(&M.mu);
+    vpx_image_t *im = NULL;
+    if (vpx_codec_decode(&M.dec, M.map + M.off_of[idx], M.size_of[idx], NULL, 0) == VPX_CODEC_OK) {
+        vpx_codec_iter_t it = NULL;
+        im = vpx_codec_get_frame(&M.dec, &it);
+    }
+    plat_mutex_lock(&M.mu);
+    if (!im || im->fmt != VPX_IMG_FMT_I420 || im->d_w != M.w || im->d_h != M.h) return;
+    Frame *f = &M.ring[v % RING];
+    if (!f->y) f->y = malloc(ys + 2 * cs), f->u = f->y + ys, f->v = f->u + cs;
+    for (uint32_t r = 0; r < M.h; r++) memcpy(f->y + (size_t)r * M.w, im->planes[0] + (size_t)r * im->stride[0], M.w);
+    for (uint32_t r = 0; r < M.h / 2; r++) {
+        memcpy(f->u + (size_t)r * (M.w / 2), im->planes[1] + (size_t)r * im->stride[1], M.w / 2);
+        memcpy(f->v + (size_t)r * (M.w / 2), im->planes[2] + (size_t)r * im->stride[2], M.w / 2);
+    }
+    f->idx = v;
+    plat_cond_broadcast(&M.cv);
+}
+
 // Decoder thread: keeps the frames from `want` on in the ring. Frames are counted on through a looping movie's loops,
 // so at the file's end the decoder goes on with its first frame (a key frame) before Bink gets there, and a loop
 // starting again finds its first frames decoded.
 static void decode_main(void *arg) {
     (void)arg;
-    size_t ys = (size_t)M.w * M.h, cs = ys / 4;
     plat_mutex_lock(&M.mu);
     while (!M.stop) {
         uint32_t want = M.want;
@@ -158,37 +231,22 @@ static void decode_main(void *arg) {
             plat_cond_wait_ms(&M.cv, &M.mu, 50);
             continue;
         }
-        uint32_t v = M.next++, idx = v % M.nframes;
-        plat_mutex_unlock(&M.mu);
-        vpx_image_t *im = NULL;
-        if (vpx_codec_decode(&M.dec, M.map + M.off_of[idx], M.size_of[idx], NULL, 0) == VPX_CODEC_OK) {
-            vpx_codec_iter_t it = NULL;
-            im = vpx_codec_get_frame(&M.dec, &it);
-        }
-        plat_mutex_lock(&M.mu);
-        if (!im || im->fmt != VPX_IMG_FMT_I420 || im->d_w != M.w || im->d_h != M.h) continue;
-        Frame *f = &M.ring[v % RING];
-        if (!f->y) f->y = malloc(ys + 2 * cs), f->u = f->y + ys, f->v = f->u + cs;
-        for (uint32_t r = 0; r < M.h; r++) memcpy(f->y + (size_t)r * M.w, im->planes[0] + (size_t)r * im->stride[0], M.w);
-        for (uint32_t r = 0; r < M.h / 2; r++) {
-            memcpy(f->u + (size_t)r * (M.w / 2), im->planes[1] + (size_t)r * im->stride[1], M.w / 2);
-            memcpy(f->v + (size_t)r * (M.w / 2), im->planes[2] + (size_t)r * im->stride[2], M.w / 2);
-        }
-        f->idx = v;
-        plat_cond_broadcast(&M.cv);
+        decode_one(M.next++);
     }
     plat_mutex_unlock(&M.mu);
 }
 
+// Stops the decoder thread (if one runs) and frees the decoder (if made), the ring, the index and the file.
 static void stop_decoder(void) {
-    if (!M.th) return;
-    plat_mutex_lock(&M.mu);
-    M.stop = 1;
-    plat_cond_broadcast(&M.cv);
-    plat_mutex_unlock(&M.mu);
-    plat_thread_join(M.th);
-    M.th = NULL;
-    vpx_codec_destroy(&M.dec);
+    if (M.th) {
+        plat_mutex_lock(&M.mu);
+        M.stop = 1;
+        plat_cond_broadcast(&M.cv);
+        plat_mutex_unlock(&M.mu);
+        plat_thread_join(M.th);
+        M.th = NULL;
+    }
+    if (M.dec_ok) vpx_codec_destroy(&M.dec), M.dec_ok = 0;
     free_ring();
     free(M.off_of), free(M.size_of);
     M.off_of = NULL, M.size_of = NULL;
@@ -196,49 +254,69 @@ static void stop_decoder(void) {
     M.file = NULL, M.map = NULL;
 }
 
-void hd_movie_opened(uintptr_t h, int loop) {
+void hd_movie_opened(uintptr_t h, int loop, int other) {
     lazy_init();
     if (M.off || !h) return;
-    char name[64];
-    plat_mutex_lock(&M.mu);
-    snprintf(name, sizeof name, "%s", M.pending);
-    M.pending[0] = 0;
-    plat_mutex_unlock(&M.mu);
-    if (!name[0] || M.hbink) return;
+    char name[64] = "";
+    if (!other) {
+        plat_mutex_lock(&M.mu);
+        snprintf(name, sizeof name, "%s", M.pending);
+        M.pending[0] = 0;
+        plat_mutex_unlock(&M.mu);
+    }
     const uint32_t *hb = (const uint32_t *)h;
     char path[2200];
     snprintf(path, sizeof path, "%s/%s.ivf", M.dir, name);
-    if (!plat_file_exists(path)) return;
+    if (!name[0] || M.hbink || !plat_file_exists(path)) {   // not replaced: checked against the replaced movie
+        other_opened(h);
+        return;
+    }
     stop_decoder();
     M.file = plat_file_open(path);
     if (!M.file || !ivf_index()) {
         rt_log("hd movie: %s: not a VP9 IVF file of even width and height; the game's movie plays", path);
         stop_decoder();
+        other_opened(h);
+        return;
+    }
+    // The file's shape is the Bink movie's (within 1 %): else the name was another movie's
+    if (llabs((long long)M.w * hb[1] - (long long)M.h * hb[0]) * 100 > (long long)M.w * hb[1]) {
+        rt_log("hd movie: %s is %ux%u, not the shape of the movie BinkOpen returned (%ux%u); the game's movie plays",
+               path, M.w, M.h, hb[0], hb[1]);
+        stop_decoder();
+        other_opened(h);
         return;
     }
     vpx_codec_dec_cfg_t cfg = {.threads = 8, .w = M.w, .h = M.h};
     vpx_codec_err_t err = vpx_codec_dec_init(&M.dec, vpx_codec_vp9_dx(), &cfg, 0);
     if (err != VPX_CODEC_OK) {
         rt_log("hd movie: %s: the VP9 decoder did not start (%s); the game's movie plays", path, vpx_codec_err_to_string(err));
-        M.file = (plat_file_close(M.file), NULL);
-        free(M.off_of), free(M.size_of);
-        M.off_of = NULL, M.size_of = NULL;
+        stop_decoder();
+        other_opened(h);
         return;
     }
+    M.dec_ok = 1;
     free_ring();
     M.missed_at = UINT32_MAX;
     M.stop = 0, M.next = 0, M.want = 0, M.shown = UINT32_MAX, M.loop = loop != 0, M.last_cur = 0, M.loops = 0;
     M.bw = hb[0], M.bh = hb[1], M.bframes = hb[2];
+    plat_mutex_lock(&M.mu);
+    decode_one(M.next++);   // the first frame before BinkOpen returns, so the movie's first present has it
+    __atomic_store_n(&M.hbink, h, __ATOMIC_RELEASE);   // the replay may show frame 0 from here
+    recount();
+    plat_mutex_unlock(&M.mu);
     M.th = plat_thread_new(decode_main, NULL, "hd movie");
-    __atomic_store_n(&M.hbink, h, __ATOMIC_RELEASE);
     rt_log("hd movie: %s (Bink %ux%u, %u frames) shown from %s.ivf, %ux%u, %u frames%s", name, M.bw, M.bh, M.bframes,
            name, M.w, M.h, M.nframes, M.nframes != M.bframes ? " (not the same count: frames past the end repeat the last)" : "");
 }
 
 void hd_movie_closed(uintptr_t h) {
-    if (!h || __atomic_load_n(&M.hbink, __ATOMIC_ACQUIRE) != h) return;
+    if (!h || !M.init || other_closed(h) || __atomic_load_n(&M.hbink, __ATOMIC_ACQUIRE) != h) return;
     __atomic_store_n(&M.hbink, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&hd_movie_live, 0, __ATOMIC_RELEASE);
+    plat_mutex_lock(&M.mu);
+    recount();   // no replaced movie: nothing collides
+    plat_mutex_unlock(&M.mu);
     rt_log("hd movie: closed after %llu frames uploaded, %llu of them late (not decoded yet when due)",
            (unsigned long long)M.uploads, (unsigned long long)M.missed);
     M.uploads = M.missed = 0;
@@ -365,7 +443,8 @@ void hd_movie_pass_begin(VkExec *ex) {
 }
 
 VkImageView hd_movie_view(VkFormat format, uint32_t width, uint32_t height, int slot) {
-    if (format != VK_FORMAT_R8_UNORM || !__atomic_load_n(&M.hbink, __ATOMIC_ACQUIRE) || M.shown == UINT32_MAX || !M.iw)
+    if (format != VK_FORMAT_R8_UNORM || !__atomic_load_n(&M.hbink, __ATOMIC_ACQUIRE) || M.shown == UINT32_MAX || !M.iw ||
+        __atomic_load_n(&M.collide, __ATOMIC_ACQUIRE))
         return VK_NULL_HANDLE;
     if (width == M.bw && height == M.bh) return M.view[0];
     if (width != M.bw / 2 || height != M.bh / 2) return VK_NULL_HANDLE;
