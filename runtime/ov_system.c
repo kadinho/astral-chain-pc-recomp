@@ -25,6 +25,7 @@
 #include "host.h"
 #include "ov.h"
 #include "platform/platform.h"
+#include "ui/menu.h"
 
 #define NFP_R_DEVICE_NOT_FOUND 0x8073u     // nfp: no NFC reader on the host
 #define ACCOUNT_R_INVALID 0x7c67u          // MacNativeGames' result for an unknown user handle or uid
@@ -788,12 +789,22 @@ static void ov_user_difference(Cpu *c) {
     ret_x(c, (uint64_t)((b->user.offset - a->user.offset) * 1000000000ll));
 }
 
-// ==== nn::pl shared fonts (shared_font.c). Astral Chain asks for them only from its font loader, only with Simplified Chinese,
-// Korean or Traditional Chinese text, and only for type 0; tools/extract_fonts.py writes
-// them from the user's firmware. Each type is read on first use into guest-visible memory as the BFTTF file the pl
-// shared memory holds; Address is 8 bytes past the file start (after the BFTTF header) and Size the decoded font size,
-// as in MNG. The load state is always Loaded: the game spins until it is, so missing files stop with a named fatal at
-// Address/Size instead of a hang. AC_SHARED_FONTS=<dir> overrides <romfs>/../../firmware/shared-fonts.
+// ==== nn::pl shared fonts (shared_font.c). Astral Chain draws the player's name with them, in every language: its
+// character screen (main+0x56fdec) calls GetSharedFont, then for each type listed main+0x56ef40 calls
+// GetSharedFontSize/Address and hands the address to nn::fontll::ScalableFontEngine::LoadFont without checking the
+// result. With no font listed, or a font LoadFont cannot read, the name field stays empty (measured on the new-game
+// screen: the random name drew nothing until the font was there).
+//
+// LoadFont takes a plain TrueType or OpenType font: the XOR-encoded payload of a BFTTF file, which the runtime used to
+// hand over as it was, failed the same way as no font. So a file (tools/extract_fonts.py writes them from the user's
+// firmware) is decoded when read, and the guest memory keeps the file's layout with a key-0 header (word 0 0x7f9a0218,
+// word 1 the size, both plain): Address is 8 bytes in, Size the font size, and ov_bfttf_size still reads it.
+//
+// Players have no firmware, so type 0 without its file is a substitute (font_substitute): the host's font for
+// Japanese, Korean or Chinese when the game runs in that language, else Roboto Medium, the in-game menu's font (Latin,
+// Greek, Cyrillic). The other types stay a named fatal at Address/Size, and GetSharedFont lists only what it can give.
+// The load state is always Loaded: the game spins until it is. AC_SHARED_FONTS=<dir> overrides
+// <romfs>/../../firmware/shared-fonts.
 #define SHARED_FONT_TYPES 6
 #define BFTTF_MAGIC 0x7f9a0218u
 static const char *const font_files[SHARED_FONT_TYPES] = {
@@ -835,30 +846,132 @@ static int64_t font_type(Cpu *c, const char *fn) {
 }
 static void ov_font_state(Cpu *c) { font_type(c, "GetSharedFontLoadState"); ret_x(c, 1); }
 
-// The font of type t, read and checked on first use; a named fatal when it is missing or damaged.
+static void put_be32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24), p[1] = (uint8_t)(v >> 16), p[2] = (uint8_t)(v >> 8), p[3] = (uint8_t)v;
+}
+static uint16_t be16(const uint8_t *p) { return (uint16_t)(p[0] << 8 | p[1]); }
+
+// One face of an sfnt file as a standalone font, in malloc'd memory: a TrueType collection ("ttcf", the usual form of
+// the Windows CJK fonts and of Noto Sans CJK) gives its face 0, its table directory rewritten for the tables copied
+// after it; any other file is copied as it is. NULL when the file is cut short or not an sfnt.
+static uint8_t *sfnt_face0(const uint8_t *d, uint64_t n, uint64_t *out_n) {
+    if (n < 12) return NULL;
+    uint64_t off = 0;
+    if (!memcmp(d, "ttcf", 4)) {
+        if (n < 16 || !be32(d + 8)) return NULL;
+        off = be32(d + 12);
+    }
+    if (off + 12 > n) return NULL;
+    uint32_t tag = be32(d + off), tables = be16(d + off + 4);
+    if ((tag != 0x00010000u && tag != 0x4f54544fu && tag != 0x74727565u) || !tables || off + 12 + 16ull * tables > n)
+        return NULL;
+    if (!off) {
+        uint8_t *p = malloc(n);
+        if (p) memcpy(p, d, n), *out_n = n;
+        return p;
+    }
+    uint64_t total = 12 + 16ull * tables;
+    for (uint32_t i = 0; i < tables; i++) {
+        const uint8_t *r = d + off + 12 + 16 * i;
+        uint64_t at = be32(r + 8), len = be32(r + 12);
+        if (at + len > n) return NULL;
+        total += (len + 3) & ~3ull;
+    }
+    uint8_t *p = calloc(1, total);
+    if (!p) return NULL;
+    memcpy(p, d + off, 12 + 16ull * tables);
+    uint64_t w = 12 + 16ull * tables;
+    for (uint32_t i = 0; i < tables; i++) {
+        uint8_t *r = p + 12 + 16 * i;
+        uint64_t at = be32(r + 8), len = be32(r + 12);
+        memcpy(p + w, d + at, len);
+        put_be32(r + 8, (uint32_t)w);
+        w += (len + 3) & ~3ull;
+    }
+    *out_n = total;
+    return p;
+}
+
+// Guest memory holding a plain font after a key-0 BFTTF header, the layout font_data keeps for a decoded file.
+static uint8_t *plain_bfttf(const uint8_t *font, uint64_t n, uint64_t *size) {
+    uint64_t padded = (n + 3) & ~3ull;
+    uint8_t *p = mem_kernel_alloc(8 + padded, 16);
+    memcpy(p + 8, font, n);
+    memset(p + 8 + n, 0, padded - n);
+    put_be32(p, BFTTF_MAGIC);
+    put_be32(p + 4, (uint32_t)padded);
+    *size = padded;
+    return p;
+}
+
+// Type 0 when its file is missing: the host's font for the game's language when that is Japanese, Korean or Chinese
+// (Roboto has none of their glyphs, and the game's random names are in its language), else Roboto Medium. A host font
+// stb_truetype cannot read is passed over (menu_font_usable, ui/menu.cpp).
+static uint8_t *font_substitute(uint64_t *size, char *what, size_t cap) {
+    static const char *const cjk[] = {"ja", "ko", "zh-Hans", "zh-Hant"};   // ov_language and plat_font_path codes
+    const char *lang = ov_language();
+    for (size_t i = 0; i < sizeof cjk / sizeof *cjk; i++) {
+        char path[PLAT_PATH_MAX];
+        uint64_t n = 0, face_n = 0;
+        uint8_t *file, *face;
+        if (strcmp(lang, cjk[i]) || !plat_font_path(cjk[i], path, sizeof path)) continue;
+        if (!(file = plat_file_read(path, &n))) continue;
+        face = sfnt_face0(file, n, &face_n);
+        free(file);
+        if (face && menu_font_usable(face, face_n)) {
+            uint8_t *p = plain_bfttf(face, face_n, size);
+            free(face);
+            snprintf(what, cap, "%s (face 0, the host's font for %s)", path, lang);
+            return p;
+        }
+        free(face);
+        rt_log("pl: %s cannot stand in for the shared font (not a readable sfnt); using Roboto", path);
+    }
+    uint64_t n = 0;
+    const uint8_t *roboto = menu_font_roboto(&n);
+    snprintf(what, cap, "Roboto Medium (built in; game language %s)", lang);
+    return plain_bfttf(roboto, n, size);
+}
+
+// The font of type t, read on first use and decoded to a plain font after a key-0 header; type 0 without its file is
+// font_substitute. A named fatal when another type is missing, or a file is damaged.
 static const uint8_t *font_data(Cpu *c, const char *fn, int64_t t) {
     plat_mutex_lock(&fonts.lock);
     if (!fonts.file[t]) {
         char dir[PLAT_PATH_MAX], path[PLAT_PATH_MAX + 64], lr[96];
         snprintf(path, sizeof path, "%s/%s", ov_shared_font_dir(dir, sizeof dir), font_files[t]);
         FILE *f = fopen(path, "rb");
-        if (!f)
-            rt_fatal("nn::pl::%s(%lld) from %s: no shared font %s (needed for Chinese and Korean text); run "
-                     "tools/extract_fonts.py --firmware <firmware NCA dir> or set AC_SHARED_FONTS", fn, (long long)t,
-                     caller(c, lr, sizeof lr), path);
-        plat_fseek64(f, 0, SEEK_END);
-        int64_t len = plat_ftell64(f);
-        plat_fseek64(f, 0, SEEK_SET);
-        if (len < 12 || len > (64 << 20)) rt_fatal("nn::pl: shared font %s: size %lld", path, (long long)len);
-        uint8_t *p = mem_kernel_alloc((uint64_t)len, 16);
-        size_t got = fread(p, 1, (size_t)len, f);
-        fclose(f);
-        uint64_t size = got == (size_t)len ? ov_bfttf_size(p, (uint64_t)len) : 0;
-        if (!size) rt_fatal("nn::pl: shared font %s is not a BFTTF font", path);
-        fonts.size[t] = size;
-        __atomic_store_n(&fonts.file[t], p, __ATOMIC_RELEASE);
-        rt_log("pl: shared font %lld (%s): %llu bytes from %s", (long long)t, font_type_name(t),
-               (unsigned long long)size, path);
+        if (!f && t == 0) {
+            char what[PLAT_PATH_MAX + 80];
+            uint64_t size = 0;
+            uint8_t *p = font_substitute(&size, what, sizeof what);
+            fonts.size[t] = size;
+            __atomic_store_n(&fonts.file[t], p, __ATOMIC_RELEASE);
+            rt_log("pl: shared font 0 (%s): no %s, substitute %s, %llu bytes", font_type_name(t), path, what,
+                   (unsigned long long)size);
+        } else {
+            if (!f)
+                rt_fatal("nn::pl::%s(%lld) from %s: no shared font %s; run tools/extract_fonts.py --firmware "
+                         "<firmware NCA dir> or set AC_SHARED_FONTS", fn, (long long)t, caller(c, lr, sizeof lr), path);
+            plat_fseek64(f, 0, SEEK_END);
+            int64_t len = plat_ftell64(f);
+            plat_fseek64(f, 0, SEEK_SET);
+            if (len < 12 || len > (64 << 20)) rt_fatal("nn::pl: shared font %s: size %lld", path, (long long)len);
+            uint8_t *p = mem_kernel_alloc((uint64_t)len, 16);
+            size_t got = fread(p, 1, (size_t)len, f);
+            fclose(f);
+            uint64_t size = got == (size_t)len ? ov_bfttf_size(p, (uint64_t)len) : 0;
+            if (!size || (size & 3)) rt_fatal("nn::pl: shared font %s is not a BFTTF font", path);
+            uint8_t k[4];   // the payload's big-endian words are XORed with the key
+            put_be32(k, be32(p) ^ BFTTF_MAGIC);
+            for (uint64_t i = 0; i < size; i++) p[8 + i] ^= k[i & 3];
+            put_be32(p, BFTTF_MAGIC);
+            put_be32(p + 4, (uint32_t)size);
+            fonts.size[t] = size;
+            __atomic_store_n(&fonts.file[t], p, __ATOMIC_RELEASE);
+            rt_log("pl: shared font %lld (%s): %llu bytes from %s, decoded", (long long)t, font_type_name(t),
+                   (unsigned long long)size, path);
+        }
     }
     const uint8_t *p = fonts.file[t];
     plat_mutex_unlock(&fonts.lock);
@@ -876,7 +989,7 @@ static void ov_font_size(Cpu *c) {
 
 // nn::pl::GetSharedFont(count, out, max, language): the SDK asks pl:u for the shared fonts and maps its shared memory.
 // The port already owns the font files, so fill the caller's array directly (stride 0x18: type, address, size) and let
-// the SDK skip the service. Types whose files are absent are skipped: the game's own UI fonts do not need them.
+// the SDK skip the service. Types whose files are absent are skipped, but type 0, which has a substitute.
 typedef struct { uint32_t type, pad; uint64_t addr, size; } PlSharedFontData;
 static void ov_font_get(Cpu *c) {
     int *count = (int *)(uintptr_t)c->x[0];
@@ -885,16 +998,11 @@ static void ov_font_get(Cpu *c) {
     for (int t = 0; t < SHARED_FONT_TYPES && n < max; t++) {
         char dir[PLAT_PATH_MAX], path[PLAT_PATH_MAX + 64];
         snprintf(path, sizeof path, "%s/%s", ov_shared_font_dir(dir, sizeof dir), font_files[t]);
-        if (!plat_file_exists(path)) continue;
+        if (t && !plat_file_exists(path)) continue;   // type 0 has a substitute
         const uint8_t *p = font_data(c, "GetSharedFont", t);
         out[n++] = (PlSharedFontData){(uint32_t)t, 0, (uint64_t)(uintptr_t)(p + 8), fonts.size[t]};
     }
     if (count) *count = n;
-    if (!n) {
-        char dir[PLAT_PATH_MAX];
-        rt_log("pl: GetSharedFont: no shared fonts under %s, continuing without system fonts",
-               ov_shared_font_dir(dir, sizeof dir));
-    }
     ret_x(c, 1);
 }
 

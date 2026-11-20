@@ -316,7 +316,7 @@ static void init_image(Tex *e, VkCommandBuffer cb) {
     }
 }
 
-// AC_SHADOW_SCALE (1 to 4; 2 by default, 1 in the Steam Deck profile): the game's shadow maps are made this many times
+// AC_SHADOW_SCALE (1 to 4; 1 by default): the game's shadow maps are made this many times
 // larger on each side. The rule for DEPTH16 square arrays comes from the TotK Recomp, whose game renders its sun cascades
 // into a 960x960 array of 4 layers and its static shadows into 1440x1440 and 720x720 arrays of 2; Astral Chain's sun
 // shadow map is the 2048x2048 one shadow_scale_of describes. Both are made
@@ -1642,6 +1642,9 @@ void vk_texture_debug(const VkTexImage *img, uint32_t *uploads, int *last_change
     *pages_written = e->pub.mirrored && e->uploaded ? vk_mem_changed(e->pub.addr, e->t.L.size, e->wgen, &now) : 0;
     unlock();
 }
+
+// The NVN format of the texture an image was made for (any thread: fixed at creation).
+int vk_texture_nvn_format(const VkTexImage *img) { return (int)((const Tex *)img)->key.d.format; }
 
 const VkTexImage *vk_texture_get(const tex_t *t) {
     if (!t || !t->mem) return NULL;

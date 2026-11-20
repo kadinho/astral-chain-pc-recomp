@@ -112,8 +112,8 @@ class ModelTest(unittest.TestCase):
         self.assertIn('C:\\t', m.need_text(Catalog('en')))
 
     def test_warnings_collect(self):
-        m = fold(START, {'type': 'warning', 'id': 'warn.lang_needs_fonts', 'params': {'lang': 'ko'}})
-        self.assertEqual(m.warnings, [('warn.lang_needs_fonts', {'lang': 'ko'})])
+        m = fold(START, {'type': 'warning', 'id': 'warn.npdm_differs', 'params': {'version': '1.0.1'}})
+        self.assertEqual(m.warnings, [('warn.npdm_differs', {'version': '1.0.1'})])
 
     def test_finish_without_end_event(self):
         m = fold(START, {'type': 'step', 'step': 'lift', 'state': 'started'})
@@ -157,7 +157,7 @@ class RunStatesTest(unittest.TestCase):
     FAILED = [START, {'type': 'step', 'step': 'check', 'state': 'started'}, {'type': 'step', 'step': 'check', 'state': 'done'},
               {'type': 'step', 'step': 'extract', 'state': 'started'},
               {'type': 'error', 'id': 'extract.romfs_mismatch', 'step': 'extract', 'params': {}},
-              {'type': 'warning', 'id': 'warn.lang_needs_fonts', 'params': {'lang': 'ko'}},
+              {'type': 'warning', 'id': 'warn.npdm_differs', 'params': {'version': '1.0.1'}},
               {'type': 'end', 'result': 'failed', 'seconds': 1}]
 
     def test_ok_run_has_only_done_and_skipped_steps(self):
@@ -400,7 +400,7 @@ class CatalogTest(unittest.TestCase):
                                    'space_two', 'process_died', 'result_ok', 'result_updated', 'result_failed',
                                    'result_cancelled', 'play', 'open_log', 'choice_install', 'choice_update')]
         ids += [f'ui.{n}_hint' for n in ('base', 'update', 'keys')]
-        ids += [f'step.{s}' for s in ('check', 'fonts', 'extract', 'lift', 'compile', 'prepare', 'cleanup')]
+        ids += [f'step.{s}' for s in ('check', 'extract', 'lift', 'compile', 'prepare', 'cleanup')]
         ids += ['ui.state_' + n for n in ('started', 'done', 'skipped', 'pending', 'running', 'failed')]
         for lang in UI_LANGUAGES:
             cat.set_language(lang)
@@ -410,8 +410,8 @@ class CatalogTest(unittest.TestCase):
     def test_codes_become_names(self):
         for lang, korean in (('en', 'Korean'), ('ru', 'Корейский'), ('pt-BR', 'Coreano'), ('zh-Hans', '韩语')):
             cat = Catalog(lang)
-            self.assertIn(korean, cat('warn.lang_needs_fonts', lang='ko'))
-            self.assertNotIn(' ko ', cat('warn.lang_needs_fonts', lang='ko'))
+            self.assertIn(korean, cat('check.lang_unknown', lang='ko', known='ja'))
+            self.assertNotIn(' ko ', cat('check.lang_unknown', lang='ko', known='ja'))
             self.assertNotIn('extract', cat('state.output_changed', step='extract'))
             for word in ('base', 'update', 'keys'):
                 self.assertIn(cat('param.input.' + word), cat('check.keys_wrong', input=word))

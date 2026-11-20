@@ -1,6 +1,6 @@
 """The Astral Chain installer: builds a playable folder from the player's own game files (docs/installer.md).
 
-    python -m installer --base FILE --update FILE --keys FILE --lang CODE --dest DIR [--firmware DIR] [--root DIR]
+    python -m installer --base FILE --update FILE --keys FILE --lang CODE --dest DIR [--root DIR]
                         [--temp DIR]
 
 Modules: layout (where the bundled tools are, release or repository), events (JSON progress on stdout and the log

@@ -341,8 +341,7 @@ class CleanupTest(unittest.TestCase):
         self.assertEqual(self.run_cleanup(), 'ok')
 
     def test_removes_the_scratch_and_writes_rebuild_command(self):
-        for name in ('check', 'shared-fonts'):
-            (self.ctx.temp / name).mkdir()
+        (self.ctx.temp / 'check').mkdir()
         (self.ctx.temp / 'expected-install.json').write_text('{}')
         self.assertEqual(self.run_cleanup(), 'ok')
         self.assertEqual(list(self.ctx.temp.iterdir()), [])

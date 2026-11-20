@@ -54,15 +54,19 @@ then compiles only the generated C and the install-time files (modules.c and INS
 game hashes and version in) and links them with that library. The library holds no game-derived data.
 
 Profile-guided optimisation and ThinLTO, generated code only (the runtime keeps its flags). --pgo-generate DIR builds
-a game that writes a .profraw into DIR when it exits (plat_exit calls the profile runtime's writer: _exit skips the
-atexit one); tools/pgo_profile.py merges them into tools/data/pgo/<version>.proftext.xz. --pgo-use PROFILE compiles
+a game that writes a .profraw into DIR when it exits (plat_exit calls the profile runtime's writer: _exit,
+ExitProcess and TerminateProcess skip the atexit one); tools/pgo_profile.py merges them into tools/data/pgo/<version>.proftext.xz. --pgo-use PROFILE compiles
 with a profile, --lto thin compiles to bitcode and lets lld optimise across the chunks and do the codegen, with
 --lto-jobs threads and a cache in <out>/thinlto-cache. --release-opt is both, with the version's profile when there
-is one: what the installer builds (Linux; untried with llvm-mingw). Measured on a Z1 Extreme at 13 W on 4 cores,
+is one: what the installer builds, on Linux and on Windows (llvm-mingw). Measured on a Z1 Extreme at 13 W on 4 cores,
 town, with a profile of that scene (2026-11-17, three alternating runs each): the guest render thread runs 10.9% fewer
 instructions and 9-11% fewer cycles per frame than a plain build (PGO alone 4.8% fewer instructions, ThinLTO alone
 3.8%; placing the hot functions first in .text alone, nothing). With the sparse profile of a town run and six minutes
 of play, the link takes 100 s at 12 threads and 1.4 GiB, against under a second; the compile is no slower.
+On Windows with llvm-mingw the same profile applies (every profiled function of a sampled chunk got its counts, no hash
+mismatch). Core Ultra 9 285H, game pinned to 4 E-cores, Harmony Square with camera turns, three alternating pairs
+(2026-11-18): the guest render thread ran 5.96, 6.03 and 6.53 ms per frame against 8.20, 6.49 and 7.07 for a plain
+llvm-mingw build, 7-8% less in the two steady pairs; the link takes 119 s at 16 threads and 1.0 GiB.
 
 Standard library only.
 """

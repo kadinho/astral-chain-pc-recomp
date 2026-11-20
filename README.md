@@ -16,7 +16,7 @@ Special thanks to [@capibawa](https://github.com/capibawa) for their multiple co
 
 ## Status
 
-The game is playable from the title screen to credits. The port has no known gameplay issue, including correct timings at 60FPS (perfect dodge, assault attack, 360 spin and so on) and no known visual issues. People enjoy this port for it's stutter-free experience, visuals, no audio desync (since 1.13.0 port's update) and good performances on Windows. The project goal is to make people discover this hidden gem from Platinum Games.
+The game is playable from the title screen to credits. The port has no known gameplay issue, including correct timings at 60FPS (perfect dodge, assault attack, 360 spin and so on) and no known visual issues. People enjoy this port for it's stutter-free experience, visuals, no audio desync (since 1.13.0 port's update) and good performances. The project goal is to make people discover this hidden gem from Platinum Games.
 
 Report problems as issues, following [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -24,18 +24,15 @@ Report problems as issues, following [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - Native code, not emulation. It already runs on very old systems;
 - Externally tested (Reddit, YouTube, ...): playable from intro to credits.
-- Base game 1.0.0 with its 1.0.1 update
-- 60 fps by default, in-engine cutscenes included, in sync with the voices and music; a 30 fps switch
+- [Flat 60FPS on Steam Deck](https://steamdeckhq.com/news/astral-chains-pc-port-60-fps-on-steam-deck/)
 - HDR output (HDR10), with separate brightness for the game and the HUD
-- The game's own audio: music, effects and voices
-- Custom resolutions up to 4K, or the screen's own (Automatic), and AMD FSR 1 scaling to the window
-- Temporal upscaling and anti-aliasing for the 3D scene, from native (DLAA / Native AA) to Ultra Performance: NVIDIA
+- Temporal upscaling and anti-aliasing for the 3D scene up to 4K, from native (DLAA / Native AA) to Ultra Performance: NVIDIA
   DLSS on RTX cards (with `nvngx_dlss.dll` next to `astralchain.exe`), Intel XeSS on most recent GPUs, AMD FSR 3 on any
-  GPU; the HUD stays at full resolution
+  GPU;
 - Anisotropic texture filtering up to 16x, for sharp ground into the distance
 - Low latency mode: NVIDIA Reflex or AMD Anti-Lag 2 where the driver offers them, the port's own frame timing on any
   other GPU (Intel, Steam Deck); about a third less time from the controller to the screen at 60 fps, half at 30
-- In-game settings menu (F1) and performance overlay (F10)
+- In-game settings menu (F1), performance overlay (F10)
 - No-HUD mode for screenshots and videos: F12 (or the menu's Game tab) hides the gauges, map, prompts and markers
   during play and shows them again; the menus stay
 - Setup and in-game menu in English, Russian, Brazilian Portuguese and Simplified Chinese

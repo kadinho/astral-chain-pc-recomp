@@ -58,6 +58,11 @@ void menu_vk_release(void);               // before the device goes away (gfx_wi
 // The check the font atlas runs on a system font, on the embedded font and damaged copies of it: 1 when it takes the
 // whole font and refuses a cut-off one, one without a character map and one with an unknown tag (--probe-window).
 int menu_font_check(void);
+// The same check on any font file (face 0 of a collection), for the shared-font substitute (ov_system.c).
+int menu_font_usable(const uint8_t *d, uint64_t n);
+// The embedded Roboto Medium (Latin, Greek, Cyrillic): the shared-font substitute when the game's language needs no
+// other script (ov_system.c font_substitute).
+const uint8_t *menu_font_roboto(uint64_t *n);
 
 // ---- what the menu asks of the platform side (gfx_window_win.c, gfx_window_sdl.c)
 void gfx_window_apply_settings(void);     // AC_FULLSCREEN or AC_WINDOW_SIZE changed: the window follows

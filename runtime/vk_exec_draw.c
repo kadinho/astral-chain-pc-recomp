@@ -26,6 +26,8 @@
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_hmap.h"
+#include "nvn_tex.h"
+#include "tex.h"
 #include "vk.h"
 #include "vk_exec.h"
 #include "platform/platform.h"
@@ -505,6 +507,28 @@ typedef struct ViewNode { struct ViewNode *next; ViewKey k; VkImageView view; } 
 static nvn_hmap view_of;                 // ViewKey -> VkImageView
 static nvn_hmap views_by_image;          // VkImage -> its first ViewNode
 
+// The format a sampled view takes when the game's view names another one than its texture's: Maxwell then reads the
+// texels' bits as the view's format. Both must map directly, have one texel of the same size per block and neither be
+// depth or stencil (colour images are created MUTABLE_FORMAT, vk_texture.c). Astral Chain draws its 8-bit picture into
+// an R11G11B10F scene target through an RGBA8 view and takes the case results' backdrop from it through the same
+// view: sampled in the texture's own format the backdrop was the picture's bits read as floats, red and green bands.
+// 0: the texture's format serves (the same format, or no such view on this GPU).
+static int sampled_view_format(const VkTexImage *img, const view_t *v, VkFormat *out, uint8_t *alpha_one) {
+    int nf = vk_texture_nvn_format(img);
+    TexVkFormat a, b;
+    int bw, bh, vbw, vbh;
+    if (v->format == nf || img->samples > 1 || img->block_views) return 0;
+    if (!tex_vk_format(nf, &a) || a.vk != a.ideal || a.vk != img->format || a.depth || a.stencil || a.expand_rgb) return 0;
+    if (!tex_vk_format(v->format, &b) || b.vk != b.ideal || b.depth || b.stencil || b.expand_rgb || b.chan[0]) return 0;
+    int bpb = nvn_fmt_bpb(nf, &bw, &bh), vbpb = nvn_fmt_bpb(v->format, &vbw, &vbh);
+    if (!bpb || bpb != vbpb || bw != 1 || bh != 1 || vbw != 1 || vbh != 1 || b.vk == img->format) return 0;
+    VkFormatProperties fp;
+    vkGetPhysicalDeviceFormatProperties(vk_ctx()->phys, b.vk, &fp);
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) return 0;
+    *out = b.vk, *alpha_one = b.alpha_one;
+    return 1;
+}
+
 // An image view of a registered texture for a shader resource of type `rtype` (GfxShaderRes.type); VK_NULL_HANDLE when
 // the image cannot serve it (the caller binds a stand-in). Texture lock held.
 static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, int hv, uint16_t rtype, int storage) {
@@ -553,22 +577,26 @@ static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, 
     if (storage && cube) vt = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     uint32_t aspect = vk_exec_view_aspect(img, v, hv);
     uint8_t sw[4] = {NVN_TEXTURE_SWIZZLE_R, NVN_TEXTURE_SWIZZLE_G, NVN_TEXTURE_SWIZZLE_B, NVN_TEXTURE_SWIZZLE_A};
+    VkFormat fmt = img->format;
+    uint8_t alpha_one = img->alpha_one;
+    // a view of another format reads the bits as that format, with that format's remap (it has no stand-in order)
+    int other = !storage && hv && v->set_format && sampled_view_format(img, v, &fmt, &alpha_one);
     if (!storage) {   // MNG nvn_mtl.m tex_swizzle_sel: view selectors replace the texture's, then the format remap
         memcpy(sw, hv && v->set_swizzle ? v->swz : img->swz, 4);
-        if (img->alpha_one || img->chan[0])
+        if (alpha_one || (!other && img->chan[0]))
             for (int i = 0; i < 4; i++) {
-                if (img->alpha_one && sw[i] == NVN_TEXTURE_SWIZZLE_A) sw[i] = NVN_TEXTURE_SWIZZLE_ONE;
-                else if (img->chan[0] && sw[i] >= NVN_TEXTURE_SWIZZLE_R && sw[i] <= NVN_TEXTURE_SWIZZLE_A)
+                if (alpha_one && sw[i] == NVN_TEXTURE_SWIZZLE_A) sw[i] = NVN_TEXTURE_SWIZZLE_ONE;
+                else if (!other && img->chan[0] && sw[i] >= NVN_TEXTURE_SWIZZLE_R && sw[i] <= NVN_TEXTURE_SWIZZLE_A)
                     sw[i] = img->chan[sw[i] - NVN_TEXTURE_SWIZZLE_R];
             }
     }
     uint32_t swz = (uint32_t)sw[0] | (uint32_t)sw[1] << 8 | (uint32_t)sw[2] << 16 | (uint32_t)sw[3] << 24;
-    ViewKey k = {img->image, img->format, vt, aspect, l0, nl, y0, ny, swz};
+    ViewKey k = {img->image, fmt, vt, aspect, l0, nl, y0, ny, swz};
     if (!view_of.klen) nvn_hm_init(&view_of, sizeof(ViewKey)), nvn_hm_init(&views_by_image, sizeof(VkImage));
     VkImageView found = (VkImageView)nvn_hm_get(&view_of, &k);
     if (found) return found;
     VkImageViewCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img->image, .viewType = vt,
-                                .format = img->format,
+                                .format = fmt,
                                 .components = {swz_of(sw[0]), swz_of(sw[1]), swz_of(sw[2]), swz_of(sw[3])},
                                 .subresourceRange = {aspect, l0, nl, y0, ny}};
     VkImageViewUsageCreateInfo use = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,

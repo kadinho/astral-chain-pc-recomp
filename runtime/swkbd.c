@@ -4,9 +4,10 @@
 // with SDL).
 //
 // nn::swkbd::ShowKeyboard: text entry for the game. On the Switch the call starts the keyboard library applet, which
-// takes the screen until the player confirms or cancels. Astral Chain calls it in one place, naming a horse at a stable
-// (main+0x1ecbf64 -> main+0x1b2b3a0: UserName preset, at most 9 characters, '@' '%' '\' disabled, UTF-16 out, no
-// header, guide or initial text; an empty answer counts as not named).
+// takes the screen until the player confirms or cancels. Astral Chain calls it in one place, main+0x9ab670, after
+// SetInitialText: the player's name, "Enter a name" on the new-game character screen. The game draws the name with the
+// Switch shared font 0 (ov_system.c, which gives a substitute without the firmware's). The log line below prints the
+// limits and the answer of each call.
 //
 // Front end: text_entry_run (swkbd.h), run on the guest thread that called (the call blocks, as on the Switch). The thread gives its virtual core up meanwhile, so the other guest threads keep running; it holds no
 // lock across the wait. The text starts as the game's initial text, else a default name from the catalog (ui_text.c),

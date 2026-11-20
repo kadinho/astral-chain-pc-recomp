@@ -21,8 +21,9 @@
 #include "imgui_internal.h"   // SetFocusID, NavCursorVisible
 #include "backends/imgui_impl_vulkan.h"
 // A private copy of stb_truetype, the parser Dear ImGui builds its font atlas with, to check a system font before the
-// atlas gets it (font_usable). Its asserts only mark the font bad here.
-static int g_font_bad;
+// atlas gets it (font_usable). Its asserts only mark the font bad here, per thread: the menu and the game's thread that
+// asks for the shared font (ov_system.c font_substitute) both check fonts.
+static thread_local int g_font_bad;
 #define STBTT_STATIC
 #define STB_TRUETYPE_IMPLEMENTATION
 #define STBTT_assert(x) ((x) ? (void)0 : (void)(g_font_bad = 1))
@@ -306,6 +307,13 @@ static int font_usable(const uint8_t *d, uint64_t n) {
     stbtt_fontinfo fi;
     g_font_bad = 0;
     return stbtt_InitFont(&fi, d, off) && !g_font_bad;
+}
+
+extern "C" int menu_font_usable(const uint8_t *d, uint64_t n) { return font_usable(d, n); }
+
+extern "C" const uint8_t *menu_font_roboto(uint64_t *n) {
+    *n = sizeof roboto_ttf;
+    return roboto_ttf;
 }
 
 extern "C" int menu_font_check(void) {

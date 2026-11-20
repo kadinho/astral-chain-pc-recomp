@@ -21,7 +21,8 @@ cached in toolchain/release-dl/ and checked against the sha256 in PINS; a mismat
     Astral Chain-Setup.exe  installer/launcher/launcher.c built with llvm/ (-mwindows): starts python/pythonw.exe -m installer.gui
 
 --prove compiles the generated C and links build/release-check/astralchain.exe with nothing but the folder's python/, llvm/,
-runtime/ and bin/ (PATH holds the Windows system directory and those), then runs the probes of PROBES there.
+runtime/ and bin/ (PATH holds the Windows system directory and those), the way the installer does (ThinLTO and the
+folder's profile, build_game.py --release-opt), then runs the probes of PROBES there.
 
 Both need the game version extracted and lifted first (tools/extract.py, recomp/gen.py): generated/v101, and for
 --prove its build/extracted/v101 (they are read, nothing is written to them). The
@@ -29,7 +30,9 @@ runtime library reads only what both versions' layout.h share (MOD_COUNT, MOD_MA
 
 A release also needs build/xlate built from the current sources (tools/build_xlate.py); the script stops first if not.
 
-The folder contains nothing derived from the game: check_content runs over it before the script finishes. Then the
+The folder contains nothing derived from the game but tools/data/pgo/<version>.profdata, the profile the installer
+compiles with (converted by llvm-mingw's llvm-profdata, which the folder does not ship): check_content runs over it
+before the script finishes. Then the
 folder's own python runs a check-only installer pass (no game files: it must get through the release, toolchain and host
 checks and stop at the missing game files) and the window's --selftest.
 """
@@ -303,6 +306,12 @@ def build_llvm(out):
     return dst
 
 
+def llvm_profdata():
+    """The llvm-mingw release's llvm-profdata.exe, from the unpacked archive (the folder does not ship it): it converts
+    the repository's text profiles into the indexed form the folder's clang reads."""
+    return unpack('llvm-mingw') / f'llvm-mingw-{LLVM_VERSION}-ucrt-x86_64' / 'bin' / 'llvm-profdata.exe'
+
+
 # ---- bin/ and deps ---------------------------------------------------------------------------------------------------
 
 def check_translator():
@@ -436,19 +445,18 @@ def pgo_profiles(out, profdata):
         print(f'{dst.relative_to(out).as_posix()}: {mib(dst.stat().st_size)}')
 
 
-def build_sources(out, profdata=None):
+def build_sources(out, profdata):
     copy_tree(ROOT / 'recomp', out / 'recomp', lambda r: not r.endswith(('.py', '.txt')) or '__pycache__' in r)
     for f in TOOLS_FILES:
         (out / 'tools').mkdir(exist_ok=True)
         shutil.copy2(ROOT / 'tools' / f, out / 'tools' / f)
     for d in TOOLS_DIRS:
         copy_tree(ROOT / 'tools' / d, out / 'tools' / d, lambda r: '__pycache__' in r or r.endswith('.md'))
-    # Linux only for now: the installer compiles with the profile and ThinLTO there (--release-opt); on Windows neither
-    # has been tried with llvm-mingw, so the Windows folder ships no profile
-    if profdata:
-        pgo_profiles(out, profdata)
-    else:
-        shutil.rmtree(out / 'tools' / 'data' / 'pgo', ignore_errors=True)
+    # The installer compiles the lifted code with the profile and ThinLTO (build_game.py --release-opt) on both OSes:
+    # the profile names the lifted functions (f_<guest address>) and hashes their control flow, and llvm-mingw's clang
+    # finds the same hashes as the Linux one: every function of the profile in a sampled chunk got its counts, with no
+    # hash mismatch, so the one profile serves both releases
+    pgo_profiles(out, profdata)
     # The shader variants players met, recorded in play and generated into generated/shader-answers.bin
     # (tools/prepare_shaders.py --recordings); tools/prepare_shaders.py reads them during the prepare step.
     (out / 'data').mkdir(exist_ok=True)
@@ -631,7 +639,7 @@ def prove(out, cpu='v3'):
          '--deps', out / 'runtime' / 'deps', '--runtime', out / 'runtime',
          '--runtime-lib', out / 'runtime' / ('libacrt-v2.a' if cpu == 'v2' else 'libacrt.a'),
          '--ninja', out / 'bin' / 'ninja.exe', '--version', version, '--gen', gen, '--out', chk, '--exefs', ext / 'exefs',
-         '--romfs', ext / 'romfs', '--profile', chk / 'profile'], env=env)
+         '--romfs', ext / 'romfs', '--profile', chk / 'profile', '--release-opt'], env=env)
     print(f'prove: build {time.time() - t0:.0f} s')
     for dll in ('SDL3.dll', 'libopus-0.dll', 'libxess.dll'):
         shutil.copy2(out / 'bin' / dll, chk / dll)
@@ -668,7 +676,7 @@ def main():
     build_bin(out)
     build_deps(out)
     runtime_lib(out, llvm)
-    build_sources(out)
+    build_sources(out, llvm_profdata())
     build_launcher(out, llvm)
     collect_licenses(out)
     check_folder(out)

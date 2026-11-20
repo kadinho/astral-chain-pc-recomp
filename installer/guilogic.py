@@ -114,14 +114,15 @@ def ui_language_for_langid(langid):
 
 
 def default_game_language(ui):
-    """The game language the form starts with. A Chinese window still starts with English: Chinese game text needs
-    the Switch shared fonts (ini.NEED_SHARED_FONTS), which the setup extracts only from a firmware folder, and the game
-    stops when they are missing; the player can still pick Chinese."""
+    """The game language the form starts with. A Chinese window still starts with English: Chinese game text draws
+    with the Switch shared fonts (ini.NEED_SHARED_FONTS), which the setup does not install; the runtime stands in
+    for shared font 0 only (runtime/ov_system.c font_substitute) and has not been tried with Chinese text beyond the
+    player's name. The player can still pick Chinese."""
     return 'ru' if ui == 'ru' else 'en-US'
 
 
 # Windows primary language ids (the low 10 bits of a LANGID) and the game language of each, for system_game_language.
-# Chinese and Korean are left out: their game text needs the Switch shared fonts (ini.NEED_SHARED_FONTS).
+# Chinese and Korean are left out: their game text draws with the Switch shared fonts (ini.NEED_SHARED_FONTS).
 PRIMARY_GAME_LANGUAGES = {0x09: 'en-US', 0x0c: 'fr', 0x07: 'de', 0x10: 'it', 0x0a: 'es-419', 0x13: 'nl', 0x16: 'pt',
                           0x19: 'ru', 0x11: 'ja'}
 # The whole LANGIDs whose region has a game language of its own

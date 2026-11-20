@@ -14,8 +14,8 @@ LANGUAGES = ('ja', 'en-US', 'en-GB', 'fr', 'fr-CA', 'de', 'it', 'es', 'es-419', 
              'zh-Hans', 'zh-Hant')
 # Older installer builds wrote these two codes; they are read as the canonical ones and rewritten on the next install.
 ALIASES = {'zh-CN': 'zh-Hans', 'zh-TW': 'zh-Hant'}
-# Their text falls back to the Switch shared fonts (runtime/ov_system.c), which the fonts step extracts from the
-# firmware folder when the player gives one.
+# Their text draws with the Switch shared fonts (runtime/ov_system.c). The setup has no firmware to take them from;
+# the runtime gives the game a substitute for shared font 0 only.
 NEED_SHARED_FONTS = ('ko', 'zh-Hans', 'zh-Hant')
 
 ACTIVE = re.compile(r'^(\s*)lang(\s*=\s*)(.*?)(\s*)$', re.IGNORECASE)

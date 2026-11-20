@@ -141,7 +141,7 @@ static const CfgMeta metas[] = {
     {"HDR_UI_NITS", "203", "80..500", LIVE}, {"HDR_HUE", "80", "0..100", LIVE},
     {"DEVICE_PROFILE", "auto", "auto|desktop|deck", RESTART},
     {"SHADOW_RES", "game", "game|512|768|1024|1536|2048", RESTART},
-    {"SHADOW_SCALE", "2", "1..4", RESTART},   // vk_texture.c shadow_scale_of; 1 in the Steam Deck profile
+    {"SHADOW_SCALE", "1", "1..4", RESTART},   // vk_texture.c shadow_scale_of: the game's size unless asked
     {"SHADOW_RANGE", "100", "50..400", RESTART}, {"CONTACT_SHADOWS", "0", "0..100", RESTART},
     {"PCSS", "0", "0..200", RESTART},
     // ambient occlusion (vk_ao.c; gi adds the radiance cascades of vk_rc.c): read again at the next present after a
@@ -394,8 +394,7 @@ int cfg_load(const char *path) {
 // (resolution.c res_size: it lost the device and crashed in handheld), so asking for it made the game fall back to
 // 1920x1080 and spend GPU time on pixels the screen then scaled away. A player's output_res (the menu, astralchain.ini,
 // AC_OUTPUT_RES) wins as for every key here, so a Deck docked to a 1080p display can pick 1920x1080;
-// fullscreen and vsync, as gamescope composes Game Mode; 30 fps, the game's shipping rate (AC_FPS=60 opts into the
-// community patch); VRAM pack: ASTC recompressed to BC1 / BC3 by the alpha scan (a quarter to an eighth of RGBA8),
+// fullscreen and vsync, as gamescope composes Game Mode; VRAM pack: ASTC recompressed to BC1 / BC3 by the alpha scan (a quarter to an eighth of RGBA8),
 // ASTC textures of 1024 texels or more without their level 0 (three quarters less each), 512 MiB texture cache, pressure
 // drops at 70%,
 // no automatic anisotropic boost; shadows: fixed 512 sun map (stable, no heap growth past 960), scale 1, range 100,
@@ -403,18 +402,17 @@ int cfg_load(const char *path) {
 // controller and takes its handheld render-target sizes and performance mode (ov_system.c ov_handheld);
 // no CPU boost (platform/linux.c plat_cpu_boost): the CPU and the GPU share one power limit (15 W) there, and a 1.6.0
 // session in the headquarters showed the CPU drawing 9.1 W against the GPU's 2.3 W with the GPU 83% busy at 25 fps:
-// the GPU ran out of power, not the CPU of frequency, and the boost would move more of the budget to the CPU;
-// the game's SMAA off (anti_aliasing = off: its edge and weight passes are skipped and the blend pass copies the
-// composite, see vk_dlaa.c vk_dlaa_skip_draw), which spares the GPU, the side of the shared power limit that runs out.
-// A player who wants it back picks SMAA in the menu or sets anti_aliasing = smaa; cfg_migrate_deck_aa moves a stored
-// line out of the way once.
+// the GPU ran out of power, not the CPU of frequency, and the boost would move more of the budget to the CPU.
+// The game's SMAA stays on (the table's anti_aliasing = smaa). 1.19.0 and 1.19.1 turned it off here and removed a stored
+// anti_aliasing line once on a Deck, marking the file with deck_aa_migrated = 1 (still a known key, read by nothing);
+// an off picked since then stays, as any player's line does. The frame rate is the table's 60 (the community patch) as
+// well; up to 1.19.2 the profile held the game's shipping 30, and an fps = 30 the player stored stays.
 static const struct { const char *key, *value; } DECK[] = {
     {"FULLSCREEN", "1"}, {"WINDOW_SIZE", "1280x800"}, {"OUTPUT_RES", "1280x720"}, {"RENDER_SCALE", "game"},
-    {"VK_PRESENT", "fifo"}, {"FPS", "30"}, {"OPERATION_MODE", "handheld"},
+    {"VK_PRESENT", "fifo"}, {"OPERATION_MODE", "handheld"},
     {"ASTC_BC", "bc1"}, {"TEX_MIP_SKIP", "1024"}, {"TEX_CACHE_MB", "512"}, {"TEX_VRAM_PRESSURE", "70"}, {"ANISO", "game"},
     {"SHADOW_RES", "512"}, {"SHADOW_SCALE", "1"}, {"SHADOW_RANGE", "100"}, {"CONTACT_SHADOWS", "0"}, {"PCSS", "0"},
     {"DRAW_DISTANCE", "100"}, {"LIB_PREBUILD_KEEP", "512"}, {"CPU_BOOST", "0"},
-    {"ANTI_ALIASING", "off"},
 };
 static int profile = -1;   // 0 none, 1 Steam Deck
 
@@ -456,6 +454,10 @@ static int profile_of(void) {
 }
 
 const char *cfg_device_profile(void) { return profile_of() ? "deck" : "desktop"; }
+
+// --probe-cfg: the probe checks the table and the deck profile whatever machine and astralchain.ini it runs with, where
+// cfg_init has already fixed the profile.
+void cfg_force_profile(int deck) { __atomic_store_n(&profile, deck ? 1 : 0, __ATOMIC_RELEASE); }
 
 static const char *raw_get(const char *name) {
     const char *e = getenv(name);
@@ -879,41 +881,6 @@ int cfg_migrate_deck_res(int deck) {
     return reset ? 2 : 1;
 }
 
-// ---- Steam Deck: the game's SMAA is off by default (the profile's anti_aliasing = off). Up to 1.19.0 it was on, so a
-// file may carry anti_aliasing = smaa, written by the menu, by hand or by migrate_upscaling's rewrite of the old
-// layout, and that line would keep the SMAA on against the new default. Once, on a Deck, a stored anti_aliasing other
-// than off is removed so the profile's value applies. The marker deck_aa_migrated = 1 goes into the file whether or
-// not a line moved, so a smaa picked afterwards stays, and a fresh install is left alone. The environment's
-// AC_ANTI_ALIASING is a choice for one launch and is not looked at. Off the Deck (deck = 0) nothing is read or
-// written. Returns 0 when nothing ran (not a Deck, or already done), 1 when only the marker was set, 2 when the
-// anti_aliasing line was removed as well; the caller saves.
-int cfg_migrate_deck_aa(int deck) {
-    if (!deck) return 0;
-    plat_mutex_lock(&set_lock);
-    CfgEntry *mark = NULL, *aa = NULL;
-    for (int i = 0; i < n_entries; i++) {
-        if (!strcmp(entries[i].key, "DECK_AA_MIGRATED")) mark = &entries[i];
-        if (!strcmp(entries[i].key, "ANTI_ALIASING")) aa = &entries[i];
-    }
-    if (mark && mark->value && strcmp(mark->value, "0")) {
-        plat_mutex_unlock(&set_lock);
-        return 0;
-    }
-    int reset = aa && aa->value && !aa->removed && strcmp(aa->value, "off");
-    if (reset) {
-        rt_log("cfg: Steam Deck: astralchain.ini anti_aliasing = %s dates from when the profile kept the game's SMAA on; "
-               "removed once so the profile's anti_aliasing = off applies (deck_aa_migrated = 1 marks it done: smaa "
-               "picked again stays)", aa->value);
-        __atomic_store_n(&aa->value, NULL, __ATOMIC_RELEASE);   // the old string stays for readers
-        aa->dirty = 0;
-        aa->removed = 1;   // cfg_save_to deletes the line
-        __atomic_add_fetch(&version, 1, __ATOMIC_RELEASE);
-    }
-    plat_mutex_unlock(&set_lock);
-    cfg_set(PREFIX "DECK_AA_MIGRATED", "1");
-    return reset ? 2 : 1;
-}
-
 // ---- the picture's shape: one move to wide. Up to 1.11.0 aspect was fit or stretch; wide, which fills a window wider
 // or taller than 16:9 with a view of its shape and is the same as fit in a 16:9 one, is the default since. A fit or stretch line in
 // astralchain.ini was chosen when there was no wide to choose, so it is removed once and the default applies. The
@@ -986,8 +953,7 @@ void cfg_init(void) {
                "turns it off)");
     // Saved at once, but no file is made only for the marker: without astralchain.ini it stays pending in memory and goes
     // in with the first save that makes the file (a menu change, F11), the only way a stored output_res can appear.
-    int moved = cfg_migrate_deck_res(profile_of()), shape = cfg_migrate_aspect(), edges = cfg_migrate_deck_aa(profile_of());
+    int moved = cfg_migrate_deck_res(profile_of()), shape = cfg_migrate_aspect();
     if (moved < shape) moved = shape;
-    if (moved < edges) moved = edges;
     if (moved == 2 || (moved == 1 && find_ini() && plat_file_exists(ini_path))) cfg_save();
 }

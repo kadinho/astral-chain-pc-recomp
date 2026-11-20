@@ -3,8 +3,9 @@
 // arguments, on the guest main thread. Checks that each one matches a relocation of the loaded modules, then the
 // values: language, operation mode, notification messages, account, time round trips, controllers, codec state,
 // graphics records, the system events behind nfp and vi, the software keyboard with arguments built by the guest SDK
-// (answers from AC_SWKBD_ANSWER, then the window pressed by AC_SWKBD_TEST) and the shared fonts when
-// tools/extract_fonts.py has written them. The named fatal stubs, and the account UID of a second run, are checked in
+// (answers from AC_SWKBD_ANSWER, then the window pressed by AC_SWKBD_TEST) and shared font 0, decoded from the file
+// tools/extract_fonts.py writes or the substitute without it. The named fatal stubs, and the account UID of a second
+// run, are checked in
 // child processes (this executable again, AC_PROBE_SERVICES_CHILD=<case>).
 #include <math.h>
 #include <stdio.h>
@@ -181,12 +182,13 @@ static const char *const observers[] = {"_ZN2nn2os21AllocateAddressRegionEPmm", 
 #define NOBS ((int)(sizeof observers / sizeof *observers))
 
 // Fatal stubs, each in its own child process: the case name, the override, what its FATAL line must say and an
-// environment variable the child runs with (the shared fonts: a font directory that does not exist).
+// environment variable the child runs with (the shared fonts: a font directory that does not exist, so type 5, which
+// has no substitute, is missing).
 #define NO_FONTS "AC_SHARED_FONTS=:probe-services:no-such-dir"
 static const struct { const char *child, *key, *fatal, *env; } fatals[] = {
     {"opus", "codec.Decode", "FATAL: nn::codec::DecodeOpusInterleavedWithHardware"},
-    {"font-address", "pl.GetSharedFontAddress", "FATAL: nn::pl::GetSharedFontAddress(0)", NO_FONTS},
-    {"font-size", "pl.GetSharedFontSize", "FATAL: nn::pl::GetSharedFontSize(0)", NO_FONTS},
+    {"font-address", "pl.GetSharedFontAddress", "FATAL: nn::pl::GetSharedFontAddress(5)", NO_FONTS},
+    {"font-size", "pl.GetSharedFontSize", "FATAL: nn::pl::GetSharedFontSize(5)", NO_FONTS},
 };
 #define NFATAL ((int)(sizeof fatals / sizeof *fatals))
 
@@ -850,29 +852,34 @@ static void probe_menu_gate(void) {
     printf("menu gate: Minus alone passes, Minus+Plus is consumed and toggles once per hold, an open menu gives a neutral pad\n");
 }
 
-// ---- shared fonts: the extracted files when present (the missing case is a fatal child)
+// ---- shared font 0: a plain font 8 bytes after a key-0 BFTTF header, decoded from the extracted file or the
+// substitute (the game's font engine reads only a plain font); the missing types are fatal children
 static void probe_fonts(void) {
     char dir[PLAT_PATH_MAX], path[PLAT_PATH_MAX + 32];
     snprintf(path, sizeof path, "%s/0-standard.bfttf", ov_shared_font_dir(dir, sizeof dir));
+    int64_t len = -1;
     FILE *f = fopen(path, "rb");
-    if (!f) {
-        printf("pl: no shared fonts in %s (tools/extract_fonts.py); Address/Size checked as named fatals only\n", dir);
-        return;
+    if (f) {
+        plat_fseek64(f, 0, SEEK_END);
+        len = plat_ftell64(f);
+        fclose(f);
     }
-    uint8_t head[12];
-    size_t got = fread(head, 1, sizeof head, f);
-    plat_fseek64(f, 0, SEEK_END);
-    int64_t len = plat_ftell64(f);
-    fclose(f);
     uint64_t size = CALL("pl.GetSharedFontSize", 0), addr = CALL("pl.GetSharedFontAddress", 0);
-    CHECK(got == sizeof head && size && size + 8 == (uint64_t)len, "shared font 0: size %llu, file %lld bytes",
-          (unsigned long long)size, (long long)len);
     const uint8_t *p = (const uint8_t *)(uintptr_t)addr;
-    CHECK(addr && !memcmp(p - 8, head, sizeof head) && ov_bfttf_size(p - 8, size + 8) == size,
-          "shared font 0: the address is not 8 bytes into the BFTTF file");
+    CHECK(addr && size && !(size & 3), "shared font 0: address %#llx, size %llu", (unsigned long long)addr,
+          (unsigned long long)size);
+    if (!addr || !size) return;
+    CHECK(len < 0 || size + 8 == (uint64_t)len, "shared font 0: size %llu, file %lld bytes", (unsigned long long)size,
+          (long long)len);
+    uint32_t magic = (uint32_t)p[-8] << 24 | (uint32_t)p[-7] << 16 | (uint32_t)p[-6] << 8 | p[-5];
+    uint32_t sfnt = (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+    CHECK(magic == 0x7f9a0218u && ov_bfttf_size(p - 8, size + 8) == size,
+          "shared font 0: no key-0 BFTTF header 8 bytes before the address");
+    CHECK(sfnt == 0x00010000u || sfnt == 0x4f54544fu || sfnt == 0x74727565u,
+          "shared font 0: the address holds no plain TrueType or OpenType font (%#x)", sfnt);
     CHECK(CALL("pl.GetSharedFontAddress", 0) == addr, "shared font 0: the address changed");
-    printf("pl: shared font 0 (Standard) at %#llx, %llu bytes, BFTTF header checked (%s)\n", (unsigned long long)addr,
-           (unsigned long long)size, path);
+    printf("pl: shared font 0 (Standard) at %#llx, %llu bytes, plain font after a key-0 header (%s)\n",
+           (unsigned long long)addr, (unsigned long long)size, len < 0 ? "substitute" : path);
 }
 
 // The host catalog (ui_text.c): every menu id has its own English, Russian, Brazilian Portuguese and Simplified
@@ -977,8 +984,8 @@ static void child_main(Cpu *c) {
         return;
     }
     if (!strcmp(child_mode, "opus")) CALL("codec.Decode", U(buf), U(buf + 8), U(buf + 16), U(buf + 64), 0x100, U(buf + 0x800), 16);
-    else if (!strcmp(child_mode, "font-address")) CALL("pl.GetSharedFontAddress", 0);
-    else if (!strcmp(child_mode, "font-size")) CALL("pl.GetSharedFontSize", 0);
+    else if (!strcmp(child_mode, "font-address")) CALL("pl.GetSharedFontAddress", 5);
+    else if (!strcmp(child_mode, "font-size")) CALL("pl.GetSharedFontSize", 5);
     else rt_fatal("probe-services: unknown child case %s", child_mode);
     printf("child %s: the call returned\n", child_mode);
 }

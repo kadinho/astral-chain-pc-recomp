@@ -32,7 +32,7 @@ from pathlib import Path
 
 from . import ini
 from . import lifeline
-from .layout import EXE, SUPPORTED, WIN, running_appimage, version_tag
+from .layout import EXE, SUPPORTED, running_appimage, version_tag
 from .runner import InstallError, Step
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'tools'))
@@ -793,8 +793,9 @@ class Compile(Step):
     id = 'compile'
 
     def key(self, ctx):
-        # tools/data/pgo: the profile --release-opt optimises with (build_game.py --pgo-use auto)
-        return fingerprint('compile-5', ctx.keys['lift'], runtime_key(ctx), ctx.layout.tools / 'data' / 'pgo')
+        # tools/data/pgo: the profile --release-opt optimises with (build_game.py --pgo-use auto). compile-6: Windows
+        # builds with --release-opt too
+        return fingerprint('compile-6', ctx.keys['lift'], runtime_key(ctx), ctx.layout.tools / 'data' / 'pgo')
 
     def current(self, ctx, record):
         exe = ctx.dest / ('astralchain' + EXE)
@@ -837,8 +838,8 @@ class Compile(Step):
             '--runtime', layout.runtime, *(['--runtime-lib', lib] if lib else ()), '--ninja', layout.ninja,
             '--version', version_tag(game_version(ctx)), '--expected', expected_install,
             '--exefs', dest / 'exefs', '--romfs', dest / 'romfs',
-            # ThinLTO and the profile (build_game.py --release-opt): Linux only, untried with llvm-mingw
-            '--profile', dest / 'profile', *([] if WIN else ['--release-opt'])], parse)
+            # ThinLTO and the profile of play (build_game.py --release-opt), on every OS
+            '--profile', dest / 'profile', '--release-opt'], parse)
         exe = build / ('astralchain' + EXE)
         if code or not exe.is_file():
             raise InstallError('compile.failed', code=code, log=str(log))
@@ -967,7 +968,7 @@ class Cleanup(Step):
             remove(stale)
         # The temp folder itself goes once the reporter closed its log (installer/cli.py finish_temp): the generated C,
         # the objects and the logs live in build-cache/.
-        for name in ('check', 'shared-fonts', 'expected-install.json'):
+        for name in ('check', 'expected-install.json'):
             remove(ctx.temp / name)
         romfs_problem(dest / 'romfs', expected_game(ctx))
         write_rebuild_command(ctx)

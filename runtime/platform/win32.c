@@ -681,23 +681,89 @@ void plat_mem_read_fault_hook(int (*fn)(uint64_t addr)) {
 
 static void (*crash_fn)(const PlatCrash *c);
 
+static const char *crash_what(DWORD code) {
+    return code == EXCEPTION_ACCESS_VIOLATION ? "access violation"
+         : code == EXCEPTION_ILLEGAL_INSTRUCTION ? "illegal instruction"
+         : code == EXCEPTION_INT_DIVIDE_BY_ZERO ? "integer division by zero"
+         : code == EXCEPTION_PRIV_INSTRUCTION ? "privileged instruction"
+         : code == EXCEPTION_STACK_OVERFLOW ? "stack overflow"
+         : code == EXCEPTION_IN_PAGE_ERROR ? "in-page error" : NULL;
+}
+
+// The fields every report shares: this executable's base, the access that faulted, the thread's name (set by
+// plat_thread_new, or by the driver for its own threads). The name is not freed: the process ends after the report.
+static void crash_common(PlatCrash *c, const EXCEPTION_RECORD *er, uintptr_t base) {
+    c->base = base;
+    if (er && er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2)
+        c->access = (int)er->ExceptionInformation[0], c->addr = er->ExceptionInformation[1];
+    PWSTR w = NULL;
+    if (SUCCEEDED(GetThreadDescription(GetCurrentThread(), &w)) && w)
+        WideCharToMultiByte(CP_UTF8, 0, w, -1, c->thread, sizeof c->thread - 1, NULL, NULL);
+}
+
 static LONG CALLBACK crash_veh(EXCEPTION_POINTERS *ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
-    const char *what = code == EXCEPTION_ACCESS_VIOLATION ? "access violation"
-                     : code == EXCEPTION_ILLEGAL_INSTRUCTION ? "illegal instruction"
-                     : code == EXCEPTION_INT_DIVIDE_BY_ZERO ? "integer division by zero"
-                     : code == EXCEPTION_PRIV_INSTRUCTION ? "privileged instruction"
-                     : code == EXCEPTION_STACK_OVERFLOW ? "stack overflow"
-                     : code == EXCEPTION_IN_PAGE_ERROR ? "in-page error" : NULL;
+    const char *what = crash_what(code);
     if (!what) return EXCEPTION_CONTINUE_SEARCH;
     uintptr_t rip = (uintptr_t)ep->ContextRecord->Rip;
     MODULEINFO mi;
     if (!GetModuleInformation(GetCurrentProcess(), GetModuleHandleW(NULL), &mi, sizeof mi) ||
         rip - (uintptr_t)mi.lpBaseOfDll >= mi.SizeOfImage)
-        return EXCEPTION_CONTINUE_SEARCH;   // not our code: leave it to the handler that expects it
+        return EXCEPTION_CONTINUE_SEARCH;   // not our code: its module's handlers first, then crash_unhandled
     PlatCrash c = {what, (uint32_t)code, rip, rip - (uintptr_t)mi.lpBaseOfDll, -1, 0};
-    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2)
-        c.access = (int)ep->ExceptionRecord->ExceptionInformation[0], c.addr = ep->ExceptionRecord->ExceptionInformation[1];
+    crash_common(&c, ep->ExceptionRecord, (uintptr_t)mi.lpBaseOfDll);
+    crash_fn(&c);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// The last chance: an exception no handler took, in any module. A graphics driver's fault (an access violation in
+// igvk64.dll, say) ends here, crash_veh having left it to the driver's own handlers; without this filter Windows ended
+// the process and the log ended with no report. The report names the module, the offset in it, and the
+// frames of this executable the thread was in, unwound from the fault's context: the call into the driver, which the
+// release's link map names (build_game.py writes it).
+static LONG WINAPI crash_unhandled(EXCEPTION_POINTERS *ep) {
+    static char module[MAX_PATH * 3];
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    const char *what = crash_what(code);
+    if (!what) what = code == 0xe06d7363u ? "unhandled C++ exception" : "unhandled exception";
+    CONTEXT ctx = *ep->ContextRecord;
+    uintptr_t rip = (uintptr_t)ctx.Rip;
+    MODULEINFO mi = {0};
+    GetModuleInformation(GetCurrentProcess(), GetModuleHandleW(NULL), &mi, sizeof mi);
+    uintptr_t base = (uintptr_t)mi.lpBaseOfDll;
+    PlatCrash c = {what, (uint32_t)code, rip, rip - base, -1, 0};
+    crash_common(&c, ep->ExceptionRecord, base);
+    HMODULE m = NULL;
+    if (rip - base >= mi.SizeOfImage) {
+        c.module = "no module";
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCWSTR)rip, &m)) {
+            wchar_t w[MAX_PATH];
+            DWORD n = GetModuleFileNameW(m, w, MAX_PATH);
+            const wchar_t *name = w;
+            for (DWORD i = 0; i < n; i++)
+                if (w[i] == L'\\' || w[i] == L'/') name = w + i + 1;
+            if (n && WideCharToMultiByte(CP_UTF8, 0, name, -1, module, sizeof module, NULL, NULL)) c.module = module;
+            c.offset = rip - (uintptr_t)m;
+        }
+    }
+    // Walk the fault's stack by the unwind tables (every x64 module has them; a function without an entry is a leaf
+    // whose return address is at rsp) and keep the frames in this executable. Each step checks that the stack slot it
+    // reads is there: a second fault in this filter would end the process without the report.
+    for (int i = 0; i < 256 && ctx.Rip && c.nframes < (int)(sizeof c.frames / sizeof *c.frames); i++) {
+        if (!plat_mem_readable(ctx.Rsp, 64)) break;
+        DWORD64 fbase = 0;
+        PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(ctx.Rip, &fbase, NULL);
+        if (f) {
+            void *hdata;
+            DWORD64 frame;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, fbase, ctx.Rip, f, &ctx, &hdata, &frame, NULL);
+        } else {
+            ctx.Rip = *(DWORD64 *)(uintptr_t)ctx.Rsp;
+            ctx.Rsp += 8;
+        }
+        if ((uintptr_t)ctx.Rip - base < mi.SizeOfImage) c.frames[c.nframes++] = (uintptr_t)ctx.Rip;
+    }
     crash_fn(&c);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -713,6 +779,7 @@ __attribute__((noinline)) static void crash_from_runtime(const char *what, uint3
     MODULEINFO mi;
     if (GetModuleInformation(GetCurrentProcess(), GetModuleHandleW(NULL), &mi, sizeof mi)) {
         uintptr_t base = (uintptr_t)mi.lpBaseOfDll;
+        crash_common(&c, NULL, base);
         for (USHORT i = 0; i < n && c.nframes < (int)(sizeof c.frames / sizeof *c.frames); i++)
             if ((uintptr_t)f[i] - base < mi.SizeOfImage) c.frames[c.nframes++] = (uintptr_t)f[i];
         if (c.nframes) c.rip = c.frames[0], c.offset = c.rip - base;
@@ -731,6 +798,7 @@ static void invalid_parameter(const wchar_t *expr, const wchar_t *func, const wc
 void plat_crash_hook(void (*fn)(const PlatCrash *c)) {
     crash_fn = fn;
     AddVectoredExceptionHandler(0, crash_veh);
+    SetUnhandledExceptionFilter(crash_unhandled);
     signal(SIGABRT, abort_signal);
     _set_invalid_parameter_handler(invalid_parameter);
 }
@@ -784,7 +852,12 @@ void plat_exit_skip_unload(void) { InterlockedExchange(&exit_skip_unload, 1); }
 // threads held, or waits for one of them, never returns: the process keeps its memory, its exit is never signalled,
 // and its exe and DLLs stay locked. TerminateProcess ends all threads without running any of that; the log and the
 // C streams are flushed first, and the exit code is the same.
+// The profile runtime's writer, present only in a build with --pgo-generate (tools/build_game.py): it writes the
+// .profraw from an atexit handler, which neither ExitProcess nor TerminateProcess runs.
+extern int __llvm_profile_write_file(void) __attribute__((weak));
+
 void plat_exit(int code) {
+    if (__llvm_profile_write_file) __llvm_profile_write_file();
     fflush(stdout);
     fflush(stderr);
     if (InterlockedCompareExchange(&exit_skip_unload, 0, 0)) {

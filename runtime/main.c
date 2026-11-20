@@ -229,22 +229,26 @@ static void crash_handler(const PlatCrash *x) {
     if (plat_xchg32(&busy, 1)) plat_exit(71);
     char d[160];
     uintptr_t rip = x->rip;
-    rt_logf("FATAL: %s (%#x) at host %p (astralchain+%#llx)", x->what, x->code, (void *)rip, (unsigned long long)x->offset);
+    rt_logf("FATAL: %s (%#x) at host %p (%s+%#llx)", x->what, x->code, (void *)rip,
+            x->module ? x->module : "astralchain", (unsigned long long)x->offset);
     if (x->access >= 0)
         rt_logf(", %s address %#llx", x->access == 1 ? "writing" : x->access == 8 ? "executing" : "reading",
                 (unsigned long long)x->addr);
-    rt_log_raw("\n", 1);
+    rt_logf(", host thread %s\n", x->thread[0] ? x->thread : "without a name");
+    if (x->module)   // a driver's fault: the frames below are the port's calls that led into it
+        rt_logf("  the fault is in %s, not in the port's code; the frames below are where the port called it\n",
+                x->module);
     // A driver that runs out of memory faults or throws instead of returning an error: the commit tells that apart from
     // a driver bug, as rt_fatal's line does for the port's own failed allocations (the census logs it at frames 600 and
     // 1800 as the baseline to compare with).
     double proc, sys_used, sys_limit;
     plat_commit_info(&proc, &sys_used, &sys_limit);
     rt_logf("  memory commit: this process %.0f MB, the system %.0f of %.0f MB\n", proc, sys_used, sys_limit);
-    uint64_t f = lifted_function(rip);
+    uint64_t f = x->module ? 0 : lifted_function(rip);
     if (f) rt_logf("  in lifted function f_%llx = %s\n", (unsigned long long)f, ldr_describe(f, d, sizeof d));
-    for (int i = 0; i < x->nframes; i++) {   // abort and invalid parameter: where the host code called it
+    for (int i = 0; i < x->nframes; i++) {   // abort, invalid parameter, another module's fault: the host callers
         uint64_t g = lifted_function(x->frames[i]);
-        rt_logf("  host frame %2d: astralchain+%#llx", i, (unsigned long long)(x->frames[i] - (rip - x->offset)));
+        rt_logf("  host frame %2d: astralchain+%#llx", i, (unsigned long long)(x->frames[i] - x->base));
         if (g) rt_logf(" in lifted function f_%llx", (unsigned long long)g);
         rt_log_raw("\n", 1);
     }

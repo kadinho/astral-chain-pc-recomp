@@ -112,7 +112,7 @@ Every guest thread is a host thread. Astral Chain assumes Horizon's scheduler: t
   present), else a built-in sleep until the slot minus the work of the last frames (start to blit done on the GPU,
   DXVK's median-of-three maximum over 32 frames) minus a margin that grows on a missed slot and shrinks back. XeLL
   has no Vulkan API. On an Arc 140T the built-in sleep took the pad read to present from 33.3 to about 23 ms at 60 fps
-  and from 66.7 to about 33 ms at 30 fps (fifo, the Deck's profile), with no more frames over 25 (50) ms than without
+  and from 66.7 to about 33 ms at 30 fps (fifo, the Deck's present mode), with no more frames over 25 (50) ms than without
   it. `AC_TRACE=latency` logs every 600 frames where a frame's time went; `--probe-latency` runs the back end on a
   synthetic game.
 - Recorder thread. The Vulkan calls the replay makes into its command buffer are made by a thread of their own (`vk_rec.c`, after Savage Wind Recomp and LAS Recomp): each `vkCmd*` copies its arguments into a packet of a ring and the recorder makes the calls in order; calls into other command buffers are made at once; the recorder also ends the command buffer, and the submit waits until it has. In the town on an RX 9070 the replay takes 17% less time on the submitting thread. It is off by default on AMD GPUs, where the driver loses the device or hangs the GPU at startup with it (`AC_VK_RECORDER=1` forces it on, `=0` makes every call on the submitting thread).
@@ -133,9 +133,8 @@ Every guest thread is a host thread. Astral Chain assumes Horizon's scheduler: t
   1280x720, which the present fits into the 1280x800 screen with 40-row bars (`gfx_fit_rect`); the selection happens
   at start, in one exe for desktop and Deck. Decks that rendered 1080p before keep no stored 1080p:
   `cfg_migrate_deck_res` removes, once, an ini `output_res` that renders 1920x1080 and marks the file with
-  `deck_res_migrated = 1`. The profile also turns the game's SMAA off (`anti_aliasing = off`); `cfg_migrate_deck_aa`
-  removes, once, a stored `anti_aliasing` other than `off` and marks the file with `deck_aa_migrated = 1`, so a
-  `smaa` chosen afterwards stays. The game's render targets and window
+  `deck_res_migrated = 1`. The game's SMAA stays on there as elsewhere (1.19.0 and 1.19.1 turned it off on the Deck
+  and left `deck_aa_migrated = 1` in the file, a marker nothing reads now). The game's render targets and window
   textures come from one budget the graphics configuration sets (main+0x40e0b0: 310 MiB, of which 1080p uses 304),
   carved from the process heap; above 1080p's pixel count `rt_res_budget_w8` raises it with the pixels (`res_budget`:
   the measured 87 MiB and 110 bytes a pixel, 15 % to spare) and `res_heap_extra_bytes` grows the application pool by
@@ -358,7 +357,7 @@ Every guest thread is a host thread. Astral Chain assumes Horizon's scheduler: t
   0.3 MiB (Arc 140T, 184x104 probes), made only at the first frame at `gi`, at the price of the bounce of moving things
   following them about 3 frames late. `vk_rc.c`'s header lists the measurements and the variants left out.
 - The sun shadow map, one 2048x2048 DEPTH24_STENCIL8 texture on 1.0.1, is made `shadow_scale` times larger on each side
-  (`vk_texture.c` `shadow_scale_of`; 2 by default, 1 in the Steam Deck profile): its depth-only pass draws at that
+  (`vk_texture.c` `shadow_scale_of`; 1 by default, the game's size): its depth-only pass draws at that
   size and the screen-space sun mask that reads it samples in UV, so edges get finer at the same softness. At x2 it
   takes 85 MiB of its own on an Arc 140T (the pool storage it no longer aliases stays) and its pass about 0.5 ms more.
 - Occlusion queries never block the CPU; a result that is not ready counts as visible.

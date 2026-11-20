@@ -4,6 +4,7 @@
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/fs.h>
@@ -1198,13 +1199,35 @@ static void fault_handler(int sig, siginfo_t *si, void *uc) {
     if (sig == SIGSEGV && read_fault_hook && !(err & 2) &&
         read_fault_hook((uint64_t)(uintptr_t)si->si_addr)) return;
     uintptr_t rip = (uintptr_t)u->uc_mcontext.gregs[REG_RIP];
-    Dl_info at, self;
-    if (crash_fn && dladdr((void *)rip, &at) && dladdr((void *)plat_crash_hook, &self) && at.dli_fbase == self.dli_fbase) {
+    Dl_info at = {0}, self;
+    if (crash_fn && dladdr((void *)plat_crash_hook, &self)) {
+        int ours = dladdr((void *)rip, &at) && at.dli_fbase == self.dli_fbase;
         PlatCrash c = {sig == SIGSEGV ? "access violation" : sig == SIGBUS ? "bus error"
                        : sig == SIGILL ? "illegal instruction" : "arithmetic exception",
                        (uint32_t)sig, rip, rip - (uintptr_t)self.dli_fbase, -1, 0};
+        c.base = (uintptr_t)self.dli_fbase;
         if (sig == SIGSEGV || sig == SIGBUS)
             c.access = (err & 16) ? 8 : (err & 2) ? 1 : 0, c.addr = (uint64_t)(uintptr_t)si->si_addr;
+        prctl(PR_GET_NAME, c.thread);   // 16 bytes at most, NUL included
+        if (!ours) {
+            // A graphics driver's fault (Mesa's radv or anv, NVIDIA's libnvidia-glcore): the library and the offset in
+            // it, then the frames of this executable the thread was in. backtrace walks through the signal frame by
+            // the unwind tables; fault_install called it once so that it loads libgcc_s before any fault.
+            const char *name = at.dli_fname && *at.dli_fname ? at.dli_fname : "no module";
+            const char *slash = strrchr(name, '/');
+            c.module = slash ? slash + 1 : name;
+            if (at.dli_fbase) c.offset = rip - (uintptr_t)at.dli_fbase;
+            // The first frames are this handler's own, up to the signal trampoline in libc: the port's frames count
+            // only after it.
+            void *f[64];
+            int n = backtrace(f, 64), past_handler = 0;
+            for (int i = 0; i < n && c.nframes < (int)(sizeof c.frames / sizeof *c.frames); i++) {
+                Dl_info fi;
+                int in_self = dladdr(f[i], &fi) && fi.dli_fbase == self.dli_fbase;
+                if (!in_self) past_handler = 1;
+                else if (past_handler) c.frames[c.nframes++] = (uintptr_t)f[i];
+            }
+        }
         crash_fn(&c);
     }
     signal(sig, SIG_DFL);   // returns into the faulting instruction, which faults again with the default action
@@ -1214,6 +1237,8 @@ static void fault_install(void) {
     static int done;
     if (done) return;
     done = 1;
+    void *warm[1];
+    backtrace(warm, 1);   // loads libgcc_s now: fault_handler calls backtrace, and a load there would allocate
     alt_stack();
     struct sigaction sa = {.sa_sigaction = fault_handler, .sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER};
     sigemptyset(&sa.sa_mask);

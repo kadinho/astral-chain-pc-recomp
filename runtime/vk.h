@@ -476,6 +476,7 @@ uint64_t vk_texture_last_write(const tex_t *t);    // timeline value of the newe
 size_t vk_texture_texel_span(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint64_t row, uint64_t img);   // bytes ReadTexels spans; 0 for a bad region
 int vk_texture_small_dirty(void);                   // a small mirrored target holds GPU texels its storage lacks
 void vk_texture_write_back_small(uint64_t fence);   // writes those rendered by work up to fence back to storage
+int vk_texture_nvn_format(const VkTexImage *img);   // the NVN format of the texture the image was made for
 void vk_texture_debug(const VkTexImage *img, uint32_t *uploads, int *last_change, int *pages_written);   // vk_dump
 void vk_dump_request(void);   // vk_dump: dump the next full frame (F12 with AC_DUMP_KEY=1)
 uint64_t vk_dump_shader_hash(const GfxShader *s);   // the sh_<hash> the dump names this shader with
